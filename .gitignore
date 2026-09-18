@@ -1,0 +1,12 @@
+node_modules/
+*.pyc
+.DS_Store
+
+# desktop build artifacts
+desktop/renderer-dist/
+desktop/dist/
+desktop/main/core.js
+
+# local AI tooling state
+.zcode/
+.mimosa/

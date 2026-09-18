@@ -1,0 +1,30 @@
+{
+  "name": "gitid",
+  "version": "0.1.0",
+  "description": "Git 多身份管理器 — 管理全局与项目级 git 仓库的 user.name / user.email / 签名等身份配置",
+  "license": "MIT",
+  "type": "commonjs",
+  "homepage": "https://github.com/xyztony999/gitid",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xyztony999/gitid.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/xyztony999/gitid/issues"
+  },
+  "bin": {
+    "gitid": "bin/gitid.js",
+    "git-id": "bin/gitid.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "bin/",
+    "lib/"
+  ]
+}
