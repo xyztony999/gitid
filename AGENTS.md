@@ -27,8 +27,9 @@ cd cli && npm test                 # CLI e2e（沙箱）
 cd desktop && npm test             # 核心一致性 + 沙箱应用
 cd desktop && npm run dev          # 开发（vite 热更新 + electron）
 cd desktop && npm start            # 生产形态运行
-cd desktop && npm run package      # 打包 linux-arm64 AppImage → dist/
-cd desktop && npm run package:win  # 打包 Windows x64 NSIS 安装包 → dist/
+cd desktop && npm run package      # 内网开发机：linux-arm64 AppImage + 离线装配 deb → dist/
+cd desktop && npm run dist:linux  # 联网/CI：linux x64+arm64 × AppImage/deb/rpm
+cd desktop && npm run package:win  # 打包 Windows x64 + arm64 NSIS 安装包 → dist/
 npm install -g ./cli               # 安装 CLI（注册 gitid / git-id）
 ```
 

@@ -17,8 +17,9 @@
     "dev": "node dev.mjs",
     "start": "npm run sync-core && npm run build:renderer && electron .",
     "package": "npm run sync-core && npm run build:renderer && electron-builder --linux AppImage && node scripts/make-deb.mjs",
+    "dist:linux": "npm run sync-core && npm run build:renderer && electron-builder --linux AppImage deb rpm --x64 --arm64",
     "package:deb": "node scripts/make-deb.mjs",
-    "package:win": "npm run sync-core && npm run build:renderer && electron-builder --win nsis --x64",
+    "package:win": "npm run sync-core && npm run build:renderer && electron-builder --win nsis --x64 --arm64",
     "test": "node --test"
   },
   "dependencies": {

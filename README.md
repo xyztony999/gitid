@@ -62,8 +62,9 @@ cd desktop
 npm install
 npm start          # 构建渲染层并启动（生产形态）
 npm run dev        # 开发模式（vite 热更新 + electron）
-npm run package    # 打包 linux-arm64 AppImage + deb → desktop/dist/
-npm run package:win # 打包 Windows x64 NSIS 安装包 → desktop/dist/
+npm run package     # 内网开发机：linux-arm64 AppImage + make-deb 离线装配 deb → desktop/dist/
+npm run dist:linux  # 联网/CI：linux x64+arm64 的 AppImage/deb/rpm（electron-builder 原生目标）
+npm run package:win # Windows x64 + arm64 NSIS 安装包 → desktop/dist/
 ```
 
 配置档案位置：Linux/macOS 为 `~/.config/gitid/config.json`（XDG），Windows 为 `%APPDATA%\gitid\config.json`；`$GITID_CONFIG` 可覆盖。两形态均要求 `git` 在 PATH 上（桌面端只调用 git 自身，不内置）。
@@ -84,7 +85,7 @@ npm run package:win # 打包 Windows x64 NSIS 安装包 → desktop/dist/
 git tag v0.1.0 && git push github v0.1.0 && git push origin v0.1.0
 ```
 
-- **GitHub Actions**（`.github/workflows/release.yml`）：沙箱测试（CLI e2e + 桌面端含 xvfb 全链路）→ 构建 linux-arm64 AppImage/deb 与 win-x64 NSIS → 自动创建 GitHub Release 并附产物。
+- **GitHub Actions**（`.github/workflows/release.yml`）：沙箱测试（CLI e2e + 桌面端含 xvfb 全链路）→ 构建 **linux x64/arm64 × AppImage/deb/rpm** 与 **win x64/arm64 NSIS** 共 8 个产物 → 自动创建 GitHub Release 并附产物。
 - **gitee 镜像**：在 GitHub 仓库 Secrets 配置 `GITEE_TOKEN`（gitee 私人令牌）后，同一流水线会自动在 gitee 创建同名 Release 并上传同源附件；未配置则跳过。gitee 侧另有 Gitee Go 原生流水线（`.workflow/release.yml`，需在仓库设置开通）做同源构建验证。
 - **日常 CI**（`.github/workflows/ci.yml`）：push/PR 在 ubuntu/windows 双平台跑沙箱测试。
 

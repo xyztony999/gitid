@@ -27,7 +27,7 @@
 |------|---------|------|
 | Node | ≥ 18（开发机 v22） | readline/promises、node:test |
 | git | ≥ 2.x（开发机 2.25 验证） | 未使用 2.32+ 特性（如 GIT_CONFIG_GLOBAL） |
-| Electron | 33.x（linux-arm64 官方预编译） | AppImage 打包经 electron-builder 25；win-x64 NSIS |
+| Electron | 33.x | 发版矩阵：linux x64/arm64 × AppImage/deb/rpm + win x64/arm64 NSIS（ADR-015）；内网开发机离线装配见 ADR-013 |
 | Vue / AntD | Vue 3.5 / ant-design-vue 4.2 | vite 5 构建 |
 | 依赖 | CLI 运行时 0 依赖；桌面端仅 vue/antd/icons | 渲染层 bundle 后无运行时 node_modules 依赖 |
 
