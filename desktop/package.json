@@ -1,5 +1,5 @@
 {
-  "name": "gitid-desktop",
+  "name": "gitid",
   "version": "0.1.0",
   "description": "gitid 桌面端 — Git 多身份管理器（Electron + Vue3 + AntD）",
   "author": {
