@@ -28,5 +28,5 @@ jobs:
         run: npm test
         working-directory: cli
       - name: 桌面端测试
-        run: npm ci && npm test
+        run: npm ci && npm run sync-core && npm test
         working-directory: desktop
