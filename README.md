@@ -97,8 +97,6 @@ git tag v0.1.0 && git push github v0.1.0 && git push origin v0.1.0
 | 设计文档 | `docs/`（设计决策 ADR-001~014 / 对象模型 / 架构） |
 | CI/CD | `.github/workflows/`（Actions 发版/日常测试）+ `.workflow/`（Gitee Go） |
 
-> 2026-09-18 拆分：本仓原携带的 ai-project-engine 引擎资产（engine/、.claude/、profiles/）已移出至独立仓库维护，本仓专注 gitid 产品本身。
-
 ## License
 
 [MIT](./LICENSE) © Xinyi Zhang
