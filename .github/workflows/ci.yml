@@ -1,0 +1,32 @@
+# 日常 CI：push/PR 双平台跑沙箱测试（CLI e2e + 桌面端 core 一致性/沙箱；xvfb 用例仅 Linux 装 xvfb 后全跑）
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 安装 xvfb（仅 Linux，桌面端 Electron 全链路用例）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+      - name: CLI e2e
+        run: npm test
+        working-directory: cli
+      - name: 桌面端测试
+        run: npm ci && npm test
+        working-directory: desktop

@@ -76,6 +76,18 @@ npm run package:win # 打包 Windows x64 NSIS 安装包 → desktop/dist/
 
 架构：主进程 `desktop/main/`（窗口/托盘/IPC/档案监听）+ 渲染层 `desktop/renderer/`（Vue3 + AntD 4），业务核心直接复用 `cli/lib/core.js`（打包时经 `scripts/sync-core.mjs` 同步，一致性有测试保障）。
 
+## 发版流水线
+
+打版本 tag 并推送到两端即触发：
+
+```bash
+git tag v0.1.0 && git push github v0.1.0 && git push origin v0.1.0
+```
+
+- **GitHub Actions**（`.github/workflows/release.yml`）：沙箱测试（CLI e2e + 桌面端含 xvfb 全链路）→ 构建 linux-arm64 AppImage/deb 与 win-x64 NSIS → 自动创建 GitHub Release 并附产物。
+- **gitee 镜像**：在 GitHub 仓库 Secrets 配置 `GITEE_TOKEN`（gitee 私人令牌）后，同一流水线会自动在 gitee 创建同名 Release 并上传同源附件；未配置则跳过。gitee 侧另有 Gitee Go 原生流水线（`.workflow/release.yml`，需在仓库设置开通）做同源构建验证。
+- **日常 CI**（`.github/workflows/ci.yml`）：push/PR 在 ubuntu/windows 双平台跑沙箱测试。
+
 ## 仓库结构
 
 | 内容 | 位置 |
@@ -83,6 +95,7 @@ npm run package:win # 打包 Windows x64 NSIS 安装包 → desktop/dist/
 | CLI 实现 | `cli/`（bin/ 入口 + lib/ 共用核心 + test/） |
 | 桌面端实现 | `desktop/`（main/ 主进程 + renderer/ Vue3 渲染层 + scripts/） |
 | 设计文档 | `docs/`（设计决策 ADR-001~014 / 对象模型 / 架构） |
+| CI/CD | `.github/workflows/`（Actions 发版/日常测试）+ `.workflow/`（Gitee Go） |
 
 > 2026-09-18 拆分：本仓原携带的 ai-project-engine 引擎资产（engine/、.claude/、profiles/）已移出至独立仓库维护，本仓专注 gitid 产品本身。
 

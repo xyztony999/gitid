@@ -1,0 +1,39 @@
+# Gitee Go 发版流水线：推 v* tag 触发（需在 gitee 仓库设置中开通流水线/Gitee Go）
+# 作用：国产构建机上的同源验证与产物构建（AppImage arm64 + deb arm64）。
+# 正式 Release 与附件以 GitHub Actions（.github/workflows/release.yml）为准，
+# 并在配置 GITEE_TOKEN 后自动镜像回 gitee Release；本流水线产物用于构建验证。
+version: '1.0'
+name: release
+displayName: 发版构建（测试 + Linux 产物）
+triggers:
+  push:
+    tags:
+      include:
+        - v*
+stages:
+  - name: build-stage
+    displayName: 测试与构建
+    strategy: naturally
+    trigger: auto
+    executor: []
+    steps:
+      - step: shell@agent
+        name: test-and-build
+        displayName: 沙箱测试 + 构建 AppImage/deb (arm64)
+        inputs:
+          command: |
+            set -e
+            # 兜底确保 Node ≥ 18（构建机未预装或版本过低时装 22）
+            need_node=0
+            if ! command -v node >/dev/null 2>&1; then need_node=1
+            elif [ "$(node -p 'Number(process.versions.node.split(".")[0])')" -lt 18 ]; then need_node=1; fi
+            if [ "$need_node" = 1 ]; then
+              curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+              export NVM_DIR="$HOME/.nvm"
+              . "$NVM_DIR/nvm.sh"
+              nvm install 22
+            fi
+            node -v && npm -v
+            (cd cli && npm test)
+            (cd desktop && npm ci && npm run package)
+            ls -lh desktop/dist/*.AppImage desktop/dist/*.deb

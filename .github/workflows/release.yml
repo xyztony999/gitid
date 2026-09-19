@@ -1,0 +1,119 @@
+# 发版流水线：推 v* tag 触发（git push github v0.x.y && git push origin v0.x.y）
+# 测试 → 构建 linux-arm64 AppImage/deb + win-x64 NSIS → 创建 GitHub Release 附产物 → 镜像 gitee Release
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 安装 xvfb（桌面端 Electron 全链路用例）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+      - name: CLI e2e（沙箱 HOME 隔离）
+        run: npm test
+        working-directory: cli
+      - name: 桌面端测试（core 一致性 + 沙箱 + xvfb 集成）
+        run: npm ci && npm test
+        working-directory: desktop
+
+  build-linux:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: desktop
+      - name: 构建 AppImage(arm64) + deb(arm64)
+        run: npm run package
+        working-directory: desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          if-no-files-found: error
+          path: |
+            desktop/dist/*.AppImage
+            desktop/dist/*.deb
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: desktop
+      - name: 构建 NSIS 安装包(x64)
+        run: npm run package:win
+        working-directory: desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows
+          if-no-files-found: error
+          path: desktop/dist/*.exe
+
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: 创建 GitHub Release 并上传产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p assets
+          find dist -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' \) -exec cp {} assets/ \;
+          ls -lh assets/
+          gh release create "$TAG" assets/* --title "gitid $TAG" --generate-notes \
+            || gh release upload "$TAG" assets/* --clobber
+
+  # gitee Release 镜像：需在 GitHub 仓库 Secrets 配置 GITEE_TOKEN（gitee 私人令牌，勾选 projects）；
+  # 未配置则自动跳过。tag 需已推送到 gitee（发版命令同时推两端）。
+  mirror-gitee:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: 镜像 Release 到 gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if [ -z "$GITEE_TOKEN" ]; then echo '未配置 GITEE_TOKEN，跳过 gitee Release 镜像'; exit 0; fi
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          REPO='xyztony999/gitid'
+          REL=$(curl -sf -X POST "https://gitee.com/api/v5/repos/$REPO/releases" \
+            -H 'Content-Type: application/json' \
+            -d "{\"access_token\":\"$GITEE_TOKEN\",\"tag_name\":\"$TAG\",\"name\":\"gitid $TAG\",\"body\":\"与 GitHub Release 同源发布，附件一致。\"}" || true)
+          RID=$(printf '%s' "$REL" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+          if [ -z "$RID" ]; then
+            RID=$(curl -sf "https://gitee.com/api/v5/repos/$REPO/releases/tags/$TAG?access_token=$GITEE_TOKEN" \
+              | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))')
+          fi
+          echo "gitee release id: $RID"
+          # 逐个上传附件（gitee 单附件有大小上限，超限文件会失败但不阻塞其他附件）
+          find dist -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' \) | while read -r f; do
+            echo "attach: $(basename "$f")"
+            curl -s -X POST "https://gitee.com/api/v5/repos/$REPO/releases/$RID/attach_files" \
+              -F "access_token=$GITEE_TOKEN" -F "file=@$f" | head -c 200; echo
+          done
