@@ -1,6 +1,6 @@
 {
   "name": "gitid",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Git 多身份管理器 — 管理全局与项目级 git 仓库的 user.name / user.email / 签名等身份配置",
   "license": "MIT",
   "type": "commonjs",

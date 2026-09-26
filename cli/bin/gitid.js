@@ -24,7 +24,7 @@ const {
   scanRepos,
 } = core;
 
-const VERSION = '0.1.0';
+const VERSION = require('../package.json').version;
 const PROGRAM = 'gitid';
 const FLAG_WITH_VALUE = new Set(['name', 'email', 'signingkey', 'set', 'config', 'depth', 'as', 'insteadOf', 'remote', 'account']);
 
