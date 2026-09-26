@@ -86,11 +86,13 @@ jobs:
         run: |
           set -e
           TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
           mkdir -p assets
           find dist -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.exe' \) -exec cp {} assets/ \;
           ls -lh assets/
-          gh release create "$TAG" assets/* --title "gitid $TAG" --generate-notes \
-            || gh release upload "$TAG" assets/* --clobber
+          # 本任务无 checkout（无 git 上下文），gh 需显式 --repo
+          gh release create "$TAG" --repo "$REPO" assets/* --title "gitid $TAG" --generate-notes \
+            || gh release upload "$TAG" --repo "$REPO" assets/* --clobber
 
   # gitee Release 镜像：需在 GitHub 仓库 Secrets 配置 GITEE_TOKEN（gitee 私人令牌，勾选 projects）；
   # 未配置则自动跳过。tag 需已推送到 gitee（发版命令同时推两端）。
