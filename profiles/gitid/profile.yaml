@@ -1,0 +1,32 @@
+apiVersion: 1
+profile:
+  name: gitid
+  type: business
+  title: gitid — Git 多身份管理器
+  # 纯 Node CLI，暂无匹配的技术栈 profile；如后续引入 Node 工程化规范，按 engine/03-extension-guide.md §4 新增 node-cli 栈
+  depends: []
+knowledge:
+  inject: CLAUDE.md
+  sections:
+    business-concepts: knowledge/business-concepts/index.md
+    design-decisions: knowledge/design-decisions/index.md
+    service-pool: knowledge/service-pool/index.md
+    architecture-choices: knowledge/architecture-choices/index.md
+workspace:
+  root: workspace
+  index: workspace/INDEX.md
+  stages:
+    architecture: workspace/00-architecture
+    prd: workspace/02-detailed/prd
+    api: workspace/02-detailed/api
+    interaction: workspace/02-detailed/interaction
+    reports: workspace/05-reports
+  # CLI 工具无业务枚举池/选择服务池，conventions 槽位以说明性占位文件满足契约
+  conventions:
+    enum_pool: workspace/01-solution/common-spec/enum-pool.md
+    common_enums: workspace/01-solution/common-spec/common-enums.md
+    select_pool: workspace/01-solution/common-spec/select-pool.md
+slots:
+  cli_entry: cli/bin/gitid.js
+  node_engines: ">=18"
+  config_path_default: ~/.config/gitid/config.json
