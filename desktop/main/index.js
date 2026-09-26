@@ -228,7 +228,7 @@ handle('identity:remove', (e, id) => {
 handle('identity:applyGlobal', (e, id) => {
   const store = core.loadStore();
   const it = core.getIdentity(store, id);
-  const changes = core.applyIdentity(it, 'global');
+  const changes = core.applyIdentity(it, 'global', { store });
   broadcast();
   if (!IS_TEST) {
     new Notification({ title: 'gitid 全局身份已切换', body: `${id} — ${it.name} <${it.email}>` }).show();
@@ -240,14 +240,14 @@ handle('identity:applyLocal', (e, repoPath, id) => {
   if (!core.repoRoot(repoPath)) throw new GitidError(`不是 git 仓库：${repoPath}`);
   const store = core.loadStore();
   const it = core.getIdentity(store, id);
-  const changes = core.applyIdentity(it, 'local', { cwd: repoPath });
+  const changes = core.applyIdentity(it, 'local', { cwd: repoPath, store });
   broadcast();
   return { changes };
 });
 
 handle('identity:unsetLocal', (e, repoPath) => {
   if (!core.repoRoot(repoPath)) throw new GitidError(`不是 git 仓库：${repoPath}`);
-  const removed = core.unsetIdentity('local', { cwd: repoPath });
+  const removed = core.unsetIdentity('local', { cwd: repoPath, store: core.loadStore() });
   broadcast();
   return { removed };
 });
@@ -269,6 +269,24 @@ handle('identity:importGlobal', () => {
 });
 
 handle('repo:scan', (e, root, depth) => core.scanRepos(core.loadStore(), root, depth || 6));
+
+handle('repo:setMirror', (e, repoPath, remote, url) => {
+  if (!core.repoRoot(repoPath)) throw new GitidError(`不是 git 仓库：${repoPath}`);
+  return core.setMirrorPush(repoPath, remote || 'origin', url);
+});
+
+handle('repo:clearMirror', (e, repoPath, remote) => {
+  if (!core.repoRoot(repoPath)) throw new GitidError(`不是 git 仓库：${repoPath}`);
+  return core.clearMirrorPush(repoPath, remote || 'origin');
+});
+
+// 凭据管道（ADR-017）：token 只经主进程内存直达 git credential 协议，
+// 不落档案、不日志、不进任何广播载荷
+handle('credential:list', () => core.credentialList());
+
+handle('credential:set', (e, host, username, token) => core.credentialStore(host, username, token));
+
+handle('credential:remove', (e, host, username) => core.credentialErase(host, username || undefined));
 
 handle('settings:save', (e, patch) => {
   const store = core.loadStore();

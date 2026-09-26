@@ -26,7 +26,7 @@ const {
 
 const VERSION = '0.1.0';
 const PROGRAM = 'gitid';
-const FLAG_WITH_VALUE = new Set(['name', 'email', 'signingkey', 'set', 'config', 'depth', 'as']);
+const FLAG_WITH_VALUE = new Set(['name', 'email', 'signingkey', 'set', 'config', 'depth', 'as', 'insteadOf', 'remote', 'account']);
 
 // ---------- 输出与颜色 ----------
 
@@ -119,6 +119,30 @@ async function cmdAdd({ positional, flags }) {
 
   const signingkey = flags.signingkey && flags.signingkey !== true ? String(flags.signingkey) : (exists && exists.signingkey) || '';
   const gpgsign = flags.gpgsign === true ? true : null;
+  // insteadOf：给出则整体替换；未给出时编辑场景保留既有（与 signingkey 同策略）
+  let insteadOf;
+  const ioFlags = flags.insteadOf === undefined ? null : (Array.isArray(flags.insteadOf) ? flags.insteadOf : [flags.insteadOf]);
+  if (ioFlags === null) insteadOf = (exists && exists.insteadOf) || [];
+  else {
+    insteadOf = [];
+    for (const s of ioFlags) {
+      const eq = String(s).indexOf('=');
+      if (eq <= 0) die(`--insteadOf 格式应为 原始地址=替换地址：${s}`);
+      insteadOf.push({ original: String(s).slice(0, eq), url: String(s).slice(eq + 1) });
+    }
+  }
+  // accounts：凭据账号选择器 host=用户名（GCM 按 username 取凭据，token 不入档案）
+  let accounts;
+  const acFlags = flags.account === undefined ? null : (Array.isArray(flags.account) ? flags.account : [flags.account]);
+  if (acFlags === null) accounts = (exists && exists.accounts) || [];
+  else {
+    accounts = [];
+    for (const s of acFlags) {
+      const eq = String(s).indexOf('=');
+      if (eq <= 0) die(`--account 格式应为 host=用户名：${s}`);
+      accounts.push({ host: String(s).slice(0, eq), username: String(s).slice(eq + 1) });
+    }
+  }
   const extra = {};
   const sets = Array.isArray(flags.set) ? flags.set : flags.set ? [flags.set] : [];
   for (const s of sets) {
@@ -129,9 +153,9 @@ async function cmdAdd({ positional, flags }) {
     extra[k] = v;
   }
 
-  const store2 = core.upsertIdentity(store, id, { name, email, signingkey, gpgsign, extra }).store;
+  const store2 = core.upsertIdentity(store, id, { name, email, signingkey, gpgsign, insteadOf, accounts, extra }).store;
   saveStore(store2, flags.config && flags.config !== true ? flags.config : undefined);
-  info(`${exists ? '已更新' : '已新增'}身份 ${bold(id)} —— ${name} <${email}>${signingkey ? cyan(` [签名 ${signingkey}]`) : ''}`);
+  info(`${exists ? '已更新' : '已新增'}身份 ${bold(id)} —— ${name} <${email}>${signingkey ? cyan(` [签名 ${signingkey}]`) : ''}${insteadOf.length ? cyan(` [URL重写 ×${insteadOf.length}]`) : ''}${accounts.length ? cyan(` [凭据账号 ×${accounts.length}]`) : ''}`);
   info(dim(`应用：gitid use ${id}（全局） 或 gitid use ${id} --local（仅当前仓库）`));
 }
 
@@ -168,7 +192,7 @@ async function cmdUse({ positional, flags }) {
   const scope = flags.local ? 'local' : 'global';
   if (scope === 'local' && !repoRoot()) die('当前目录不在 git 仓库内（该操作需要 --local 作用域的仓库上下文）');
 
-  const changes = applyIdentity(it, scope);
+  const changes = applyIdentity(it, scope, { store });
   const where = scope === 'local' ? `${bold('当前仓库')}（${repoRoot()}）` : bold('全局');
   info(`已将身份 ${bold(id)} —— ${it.name} <${it.email}> 应用于${where}`);
   for (const ch of changes) {
@@ -232,6 +256,21 @@ async function cmdCurrent() {
   }
   for (const r of rows) info(pad(r[0], 18) + pad(r[1], 34) + dim(r[2]));
 
+  const rewrites = core.listUrlRewrites();
+  if (rewrites.length) {
+    info(`${dim('URL重写')}   ${dim('（insteadOf 生效值，本地覆盖合并全局）')}`);
+    for (const w of rewrites) info(`  ${w.original} ${dim('→')} ${w.url}`);
+  }
+
+  const creds = core.credentialList();
+  if (creds.length) {
+    info(`${dim('凭据账号')}   ${dim('（选择器 → helper 实存；token 永不展示）')}`);
+    for (const c of creds) {
+      const live = c.stored ? green(c.storedUsername) : dim('未存储');
+      info(`  ${c.host}  ${dim('选择器')} ${c.selector}  ${dim('helper')} ${live}`);
+    }
+  }
+
   if (root && hasLocal && g.identityId && g.identityId !== effId) {
     info(dim(`全局身份为 ${g.identityId}（${g.name} <${g.email}>），在本仓库被本地覆盖`));
   }
@@ -243,7 +282,7 @@ async function cmdUnset({ flags }) {
     die('当前目录不在 git 仓库内。清除全局请显式使用 gitid unset --global');
   }
   if (scope === 'local' && !repoRoot()) die('当前目录不在 git 仓库内（--local 需要仓库上下文）');
-  const removed = unsetIdentity(scope);
+  const removed = unsetIdentity(scope, { store: loadStore() });
   const where = scope === 'local' ? `当前仓库${dim(`（${repoRoot()}）`)}` : '全局';
   if (removed.length) info(`已清除${where}的身份键：${removed.join('、')}`);
   else info(`${where}没有身份配置，无需清除`);
@@ -307,18 +346,151 @@ async function cmdScan({ positional, flags }) {
   if (!rows.length) { info(`在 ${root} 下未发现 git 仓库（深度 ${depth}）`); return; }
 
   const statusMark = { ok: green('✓'), missing: red('✗'), unknown: yellow('⚠') };
-  const table = [['状态', '身份', '生效配置', '仓库']];
+  const table = [['状态', '身份', '远程', '生效配置', '仓库']];
   for (const r of rows) {
     const label = r.identityId
       ? (r.hasLocal ? cyan(`${r.identityId} ◆`) : r.identityId)
       : r.hasLocal ? cyan('本地手配 ◆') : dim('继承全局');
+    const remotes = r.remotes.length
+      ? r.remotes.map((x) => {
+          const acc = x.account ? `@${x.account}` : '';
+          return x.mirror ? cyan(`${x.name}${acc}⊕`) : `${x.name}${acc}`;
+        }).join(' ')
+      : dim('—');
     const eff = r.status === 'missing' ? red('缺失') : `${r.effective.name ?? '?'} <${r.effective.email ?? '?'}>`;
-    table.push([statusMark[r.status], label, eff, r.rel]);
+    table.push([statusMark[r.status], label, remotes, eff, r.rel]);
   }
   printTable(table, { indent: '' });
   info('');
-  info(dim(`共 ${summary.total} 个仓库：${summary.withLocal} 个本地覆盖 · ${summary.missing} 个配置缺失${summary.unknown ? ` · ${summary.unknown} 个未匹配已存身份` : ''}`));
-  info(dim('状态：✓ 正常  ✗ 缺 user.name/user.email  ⚠ 生效值未匹配任何身份档案  ◆ 本地覆盖'));
+  info(dim(`共 ${summary.total} 个仓库：${summary.withLocal} 个本地覆盖 · ${summary.missing} 个配置缺失${summary.unknown ? ` · ${summary.unknown} 个未匹配已存身份` : ''}${summary.mirrored ? ` · ${summary.mirrored} 个镜像推送` : ''}`));
+  info(dim('状态：✓ 正常  ✗ 缺 user.name/user.email  ⚠ 生效值未匹配任何身份档案  ◆ 本地覆盖  ⊕ 镜像推送'));
+}
+
+// ---------- 远程镜像管理（当前仓库；凭据归 GCM/SSH，gitid 只写非密钥配置） ----------
+
+async function cmdRemote({ positional, flags }) {
+  const root = repoRoot();
+  if (!root) die('当前目录不在 git 仓库内（gitid remote 管理当前仓库的远程与镜像推送）');
+  const [action, url] = positional;
+  const remoteName = flags.remote && flags.remote !== true ? String(flags.remote) : 'origin';
+
+  if (!action || action === 'list') {
+    const remotes = core.getRemotes(root);
+    if (!remotes.length) { info('本仓库尚未配置远程（git remote add origin <url>）'); return; }
+    const table = [['远程', 'fetch 地址', 'push 目标', '镜像']];
+    for (const r of remotes) {
+      const push = r.pushurls.length ? r.pushurls.join(' ; ') : (r.url || dim('—'));
+      table.push([r.name, r.url || dim('—'), push, r.mirror ? cyan('⊕') : dim('—')]);
+    }
+    printTable(table, { indent: '' });
+    info(dim('⊕ 镜像推送：git push 同时推全部 push 目标（gitid remote mirror 设置）'));
+    return;
+  }
+
+  if (action === 'mirror') {
+    if (!url) die('用法：gitid remote mirror <镜像地址> [--remote <name>]');
+    const r = core.setMirrorPush(root, remoteName, url);
+    info(`已开启 ${bold(remoteName)} 镜像推送，git push 将同时推：`);
+    info(`  ${dim('·')} ${r.pushurls[0]}`);
+    info(`  ${dim('·')} ${r.pushurls[1]} ${cyan('（镜像）')}`);
+    info(dim('fetch 不受影响；取消：gitid remote unmirror；凭据仍由 GCM/SSH 管理'));
+    return;
+  }
+
+  if (action === 'unmirror') {
+    const r = core.clearMirrorPush(root, remoteName);
+    if (r.removed) info(`已取消 ${bold(remoteName)} 镜像推送（清除 ${r.removed} 个 push 目标，push 回到 fetch 地址）`);
+    else info(`${remoteName} 未配置镜像推送，无需取消`);
+    return;
+  }
+  die(`未知子命令「${action}」。用法：gitid remote [list | mirror <url> | unmirror] [--remote <name>]`);
+}
+
+// ---------- 凭据管理（conduit：token 只经 stdin→helper，gitid 不留存） ----------
+
+function readAllStdin() {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => { data += c; });
+    process.stdin.on('end', () => resolve(data));
+    process.stdin.on('error', reject);
+    process.stdin.resume();
+  });
+}
+
+// 隐藏输入（terminal 模式下回显关闭）；非交互环境直接报错，由调用方改走 stdin 管道
+function hiddenPrompt(label) {
+  if (!process.stdin.isTTY) die(`${label}：当前非交互环境，请通过管道提供（echo <token> | gitid credential set …）`);
+  return new Promise((resolve, reject) => {
+    const realWrite = process.stdout.write.bind(process.stdout);
+    let muted = false;
+    process.stdout.write = (chunk, enc, cb) => {
+      if (muted && typeof chunk === 'string' && chunk !== '\n' && !chunk.startsWith('\r')) {
+        if (cb && typeof cb === 'function') cb();
+        return true;
+      }
+      return realWrite(chunk, enc, cb);
+    };
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    rl.question(`${label}: `, (answer) => {
+      process.stdout.write = realWrite;
+      rl.close();
+      realWrite('\n');
+      resolve(answer);
+    });
+    muted = true; // 问题文案已输出后静默
+  });
+}
+
+async function cmdCredential({ positional, flags }) {
+  const [action, host, username] = positional;
+
+  if (!action || action === 'list') {
+    let rows = core.credentialList();
+    if (host) rows = rows.filter((r) => r.host === core.parseCredBasis(host).host);
+    if (!rows.length) { info('尚无凭据账号选择器（gitid add --account <host>=<用户名>，或 credential set/login 先存凭据）'); return; }
+    const table = [['host', '选择器 username', 'helper 实存', '']];
+    for (const r of rows) {
+      table.push([r.host, r.selector, r.stored ? green(r.storedUsername) : dim('未存储'), r.stored ? green('✓') : dim('—')]);
+    }
+    printTable(table, { indent: '' });
+    info(dim('helper 实存经 git credential 协议只读探测；token 永不展示（ADR-017）'));
+    return;
+  }
+
+  if (action === 'login') {
+    if (!host) die('用法：gitid credential login <host> [username]（host 如 github.com，GCM 将弹自身登录窗口）');
+    const r = core.credentialLogin(host, username && username !== '' ? username : undefined);
+    info(`已登录 ${bold(r.host)} —— ${r.username}${cyan('（凭据存于 helper/钥匙串，gitid 不留存）')}`);
+    return;
+  }
+
+  if (action === 'set') {
+    if (!host || !username) die('用法：gitid credential set <host> <username>（token 经隐藏输入或 stdin 管道，不回显不留存）');
+    if (!core.hasCredentialHelper()) {
+      die('未配置 credential.helper，token 将无处保存。先执行：git config --global credential.helper manager');
+    }
+    let token;
+    if (flags['token-stdin'] || !process.stdin.isTTY) {
+      token = (await readAllStdin()).replace(/\r?\n$/, '');
+    } else {
+      token = await hiddenPrompt(`Token（${host} · ${username}，输入不回显）`);
+    }
+    const r = core.credentialStore(host, username, token);
+    info(`已保存 ${bold(r.host)} —— ${r.username}${cyan('（凭据存于 helper/钥匙串，gitid 不留存）')}`);
+    info(dim('同 host+username 再次 set 即覆盖（修改凭据）；移除：gitid credential remove'));
+    return;
+  }
+
+  if (action === 'remove') {
+    if (!host) die('用法：gitid credential remove <host> [username]');
+    const r = core.credentialErase(host, username && username !== '' ? username : undefined);
+    info(`已从 helper 删除凭据：${bold(r.host)}${r.username ? `（${r.username}）` : dim('（该 host 全部）')}`);
+    return;
+  }
+
+  die(`未知子命令「${action}」。用法：gitid credential [list | login <host> | set <host> <username> | remove <host>]`);
 }
 
 // ---------- 帮助 ----------
@@ -331,6 +503,8 @@ function cmdHelp() {
   info(bold('用法'));
   info(`  ${PROGRAM} add <id> --name <姓名> --email <邮箱> [--signingkey <key>] [--gpgsign] [--set k=v]`);
   info(`      ${dim('新增/更新身份档案（重复 add 为覆盖更新；姓名邮箱缺省时交互询问）')}`);
+  info(`      ${dim('--insteadOf 原始地址=替换地址 可重复：随身份切换 URL 重写（镜像加速/多账号协议），凭据归 GCM/SSH')}`);
+  info(`      ${dim('--account host=用户名 可重复：凭据账号选择器（GCM 按 username 取凭据，token 不入档案）')}`);
   info(`  ${PROGRAM} list                ${dim('列出所有身份（★=当前全局 ◆=当前仓库本地覆盖）')}`);
   info(`  ${PROGRAM} use <id> [--local]  ${dim('应用身份：默认写入全局，--local 仅当前仓库')}`);
   info(`  ${PROGRAM} local <id>          ${dim('等价于 use <id> --local')}`);
@@ -340,8 +514,14 @@ function cmdHelp() {
   info(`  ${PROGRAM} remove <id>         ${dim('删除身份档案（不影响已写入的 git 配置）')}`);
   info(`  ${PROGRAM} import [--as <id>]  ${dim('将现有全局 git 身份导入为档案')}`);
   info(`  ${PROGRAM} scan [目录] [--depth N] [--save]`);
-  info(`      ${dim('扫描目录下所有 git 仓库，审计身份配置（默认深度 6，不深入仓库内部）')}`);
+  info(`      ${dim('扫描目录下所有 git 仓库，审计身份配置与远程镜像状态（默认深度 6，不深入仓库内部）')}`);
   info(`      ${dim('--save 把目录与深度存为默认：此后不带参数的 scan（及桌面端扫描）直接使用')}`);
+  info(`  ${PROGRAM} remote [list | mirror <url> | unmirror] [--remote <name>]`);
+  info(`      ${dim('管理当前仓库远程：mirror 设多个 pushurl，git push 同时推原始远程与镜像（默认 origin）')}`);
+  info(`      ${dim('fetch 与凭据不受影响——gitid 只写非密钥配置（ADR-016）')}`);
+  info(`  ${PROGRAM} credential [list | login <host> | set <host> <username> | remove <host>]`);
+  info(`      ${dim('凭据管道：token 经 git credential 协议直达 helper（GCM/钥匙串），gitid 不留存不回显')}`);
+  info(`      ${dim('login 触发 GCM 自身登录窗口（推荐）；set 经隐藏输入/管道粘贴 PAT，同键再 set 即覆盖')}`);
   info('');
   info(bold('选项'));
   info(`  --config <file>   ${dim('指定配置档案路径（默认 ~/.config/gitid/config.json 或 $GITID_CONFIG）')}`);
@@ -399,6 +579,8 @@ const COMMANDS = {
   rm: cmdRemove,
   import: cmdImport,
   scan: cmdScan,
+  remote: cmdRemote,
+  credential: cmdCredential,
   help: cmdHelp,
   version: () => info(`${PROGRAM} v${VERSION}`),
 };

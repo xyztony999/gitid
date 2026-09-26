@@ -41,6 +41,24 @@
         </template>
         <template v-else-if="column.key === 'name'">{{ record.name }}</template>
         <template v-else-if="column.key === 'email'">{{ record.email }}</template>
+        <template v-else-if="column.key === 'insteadOf'">
+          <a-tooltip
+            v-if="record.insteadOf && record.insteadOf.length"
+            :title="record.insteadOf.map((p) => `${p.original} → ${p.url}`).join('\n')"
+          >
+            <span>{{ record.insteadOf.length }} 条</span>
+          </a-tooltip>
+          <span v-else class="dim">—</span>
+        </template>
+        <template v-else-if="column.key === 'accounts'">
+          <a-tooltip
+            v-if="record.accounts && record.accounts.length"
+            :title="record.accounts.map((a) => `${a.host} → ${a.username}`).join('\n')"
+          >
+            <span>{{ record.accounts.length }} 个</span>
+          </a-tooltip>
+          <span v-else class="dim">—</span>
+        </template>
         <template v-else-if="column.key === 'signingkey'">
           <span v-if="record.signingkey"><code>{{ record.signingkey }}</code>{{ record.gpgsign === true ? ' · GPG 签名开' : '' }}</span>
           <span v-else class="dim">—</span>
@@ -98,6 +116,20 @@
         <a-form-item label="提交时启用 GPG 签名（commit.gpgsign）">
           <a-switch v-model:checked="form.gpgsign" />
         </a-form-item>
+        <a-form-item label="URL 重写 insteadOf（每行一条：原始地址=替换地址）">
+          <a-textarea
+            v-model:value="form.insteadOfText"
+            :rows="2"
+            placeholder="https://github.com/=https://gh.example.com/（镜像加速 / 多账号协议切换；凭据仍归 GCM/SSH）"
+          />
+        </a-form-item>
+        <a-form-item label="凭据账号选择器（每行一条：host=用户名）">
+          <a-textarea
+            v-model:value="form.accountsText"
+            :rows="2"
+            placeholder="github.com=corp-zhang（GCM 按用户名取凭据；token 不入档案，在「凭据」页或 CLI 管理）"
+          />
+        </a-form-item>
       </a-form>
     </a-modal>
   </div>
@@ -113,11 +145,13 @@ const props = defineProps({ store: { type: Object, required: true } });
 const emit = defineEmits(['changed']);
 
 const columns = [
-  { title: 'ID', key: 'id', width: 200 },
-  { title: '姓名', key: 'name', width: 140 },
-  { title: '邮箱', key: 'email' },
-  { title: '签名', key: 'signingkey', width: 200 },
-  { title: '操作', key: 'actions', width: 220, align: 'right' },
+  { title: 'ID', key: 'id', width: 160 },
+  { title: '姓名', key: 'name', width: 110 },
+  { title: '邮箱', key: 'email', ellipsis: true },
+  { title: 'URL 重写', key: 'insteadOf', width: 90 },
+  { title: '凭据账号', key: 'accounts', width: 90 },
+  { title: '签名', key: 'signingkey', width: 150 },
+  { title: '操作', key: 'actions', width: 200, align: 'right' },
 ];
 
 const rows = computed(() => props.store.identities || []);
@@ -135,11 +169,11 @@ const globalInfo = computed(() => {
 const modalOpen = ref(false);
 const saving = ref(false);
 const editing = ref(null);
-const form = reactive({ id: '', name: '', email: '', signingkey: '', gpgsign: false });
+const form = reactive({ id: '', name: '', email: '', signingkey: '', gpgsign: false, insteadOfText: '', accountsText: '' });
 
 function openCreate() {
   editing.value = null;
-  Object.assign(form, { id: '', name: '', email: '', signingkey: '', gpgsign: false });
+  Object.assign(form, { id: '', name: '', email: '', signingkey: '', gpgsign: false, insteadOfText: '', accountsText: '' });
   modalOpen.value = true;
 }
 
@@ -151,6 +185,8 @@ function openEdit(record) {
     email: record.email,
     signingkey: record.signingkey || '',
     gpgsign: record.gpgsign === true,
+    insteadOfText: (record.insteadOf || []).map((p) => `${p.original}=${p.url}`).join('\n'),
+    accountsText: (record.accounts || []).map((a) => `${a.host}=${a.username}`).join('\n'),
   });
   modalOpen.value = true;
 }
@@ -160,6 +196,22 @@ async function save() {
     message.warning('身份 ID、姓名、邮箱均为必填');
     return;
   }
+  const insteadOf = [];
+  for (const line of form.insteadOfText.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    const eq = s.indexOf('=');
+    if (eq <= 0) { message.warning(`URL 重写格式应为 原始地址=替换地址：${s}`); return; }
+    insteadOf.push({ original: s.slice(0, eq), url: s.slice(eq + 1) });
+  }
+  const accounts = [];
+  for (const line of form.accountsText.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    const eq = s.indexOf('=');
+    if (eq <= 0) { message.warning(`凭据账号格式应为 host=用户名：${s}`); return; }
+    accounts.push({ host: s.slice(0, eq), username: s.slice(eq + 1) });
+  }
   saving.value = true;
   try {
     const r = await api.saveIdentity(form.id.trim(), {
@@ -167,6 +219,8 @@ async function save() {
       email: form.email.trim(),
       signingkey: form.signingkey.trim(),
       gpgsign: form.gpgsign,
+      insteadOf,
+      accounts,
     });
     message.success(r.exists ? `身份 ${form.id} 已更新` : `身份 ${form.id} 已创建`);
     modalOpen.value = false;

@@ -33,8 +33,8 @@ function makeSandbox() {
   };
   delete env.GIT_CONFIG_GLOBAL;
   delete env.GIT_CONFIG_SYSTEM;
-  const run = (args, cwd = home) => {
-    const r = spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', cwd, env });
+  const run = (args, cwd = home, input) => {
+    const r = spawnSync(process.execPath, [BIN, ...args], { encoding: 'utf8', cwd, env, input });
     return { code: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
   };
   const git = (args, cwd = home) => {
@@ -261,6 +261,156 @@ test('scan --save：持久化默认扫描目录，此后裸 scan 直接使用', 
   const noDir = sb.run(['scan', '--save']);
   assert.notEqual(noDir.code, 0);
   assert.match(noDir.err, /--save 需要目录参数/);
+});
+
+test('insteadOf/extras 全量覆盖：切换与清除不残留，变更清单可见（ADR-016）', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'mirror', '--name', '张三', '--email', 'zhangsan@corp.com',
+    '--insteadOf', 'https://github.com/=https://gh.example.com/']);
+  sb.run(['add', 'plain', '--name', '李四', '--email', 'li@personal.com', '--set', 'user.company=acme']);
+
+  const use1 = sb.run(['use', 'mirror']);
+  assert.equal(use1.code, 0, use1.err);
+  assert.match(use1.out, /url\.https:\/\/gh\.example\.com\/\.insteadOf/); // 重写写入在变更清单中可见
+  assert.equal(sb.git(['config', '--global', '--get', 'url.https://gh.example.com/.insteadOf']).out, 'https://github.com/');
+
+  const cur = sb.run(['current']);
+  assert.equal(cur.code, 0);
+  assert.match(cur.out, /URL重写/);
+  assert.match(cur.out, /https:\/\/github\.com\/\s+→\s+https:\/\/gh\.example\.com\//);
+
+  const use2 = sb.run(['use', 'plain']); // mirror 的重写应被清除，plain 的 extra 写入
+  assert.equal(use2.code, 0, use2.err);
+  assert.notEqual(sb.git(['config', '--global', '--get', 'url.https://gh.example.com/.insteadOf']).code, 0);
+  assert.equal(sb.git(['config', '--global', '--get', 'user.company']).out, 'acme');
+
+  const use3 = sb.run(['use', 'mirror']); // 再切回：plain 的 extra 被清除、重写恢复
+  assert.notEqual(sb.git(['config', '--global', '--get', 'user.company']).code, 0);
+  assert.equal(sb.git(['config', '--global', '--get', 'url.https://gh.example.com/.insteadOf']).out, 'https://github.com/');
+
+  sb.run(['unset', '--global']); // unset 连带清除匹配档案的 extras/insteadOf
+  assert.notEqual(sb.git(['config', '--global', '--get', 'url.https://gh.example.com/.insteadOf']).code, 0);
+});
+
+test('insteadOf 非法输入：缺 = / 地址相同 / 含空白', () => {
+  const sb = makeSandbox();
+  assert.notEqual(sb.run(['add', 'x', '--name', 'a', '--email', 'a@b.c', '--insteadOf', 'nodelimiter']).code, 0);
+  assert.notEqual(sb.run(['add', 'y', '--name', 'a', '--email', 'a@b.c', '--insteadOf', 'https://a/=https://a/']).code, 0);
+  assert.notEqual(sb.run(['add', 'z', '--name', 'a', '--email', 'a@b.c', '--insteadOf', 'https://a b/=https://c/']).code, 0);
+});
+
+test('remote mirror：pushurl 双推、scan 展示、换镜像替换、unmirror 恢复', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  assert.notEqual(sb.run(['remote', 'list'], sb.home).code, 0); // 非仓库目录报错
+
+  const repo = sb.repo('twin');
+  sb.git(['remote', 'add', 'origin', 'https://github.com/example/twin.git'], repo);
+
+  const list1 = sb.run(['remote', 'list'], repo);
+  assert.equal(list1.code, 0, list1.err);
+  assert.match(list1.out, /origin/);
+  assert.match(list1.out, /github\.com\/example\/twin\.git/);
+
+  const dup = sb.run(['remote', 'mirror', 'https://github.com/example/twin.git'], repo);
+  assert.notEqual(dup.code, 0); // 镜像地址与原地址相同 → 拒绝
+
+  const r = sb.run(['remote', 'mirror', 'https://gitee.com/example/twin.git'], repo);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /同时推/);
+  const pushes = sb.git(['config', '--local', '--get-all', 'remote.origin.pushurl'], repo);
+  assert.deepEqual(
+    pushes.out.split('\n').sort(),
+    ['https://github.com/example/twin.git', 'https://gitee.com/example/twin.git'].sort(),
+  );
+
+  const list2 = sb.run(['remote'], repo); // 不带子命令默认 list
+  assert.match(list2.out, /⊕/);
+
+  const scan = sb.run(['scan', path.join(sb.home, 'repos')]);
+  assert.equal(scan.code, 0, scan.err);
+  assert.match(scan.out, /origin⊕/);
+  assert.match(scan.out, /1 个镜像推送/);
+
+  // 换镜像地址：替换旧镜像而非追加
+  sb.run(['remote', 'mirror', 'https://mirror.example.com/twin.git', '--remote', 'origin'], repo);
+  const pushes2 = sb.git(['config', '--local', '--get-all', 'remote.origin.pushurl'], repo);
+  assert.equal(pushes2.out.split('\n').length, 2);
+  assert.match(pushes2.out, /mirror\.example\.com/);
+  assert.doesNotMatch(pushes2.out, /gitee\.com/);
+
+  const un = sb.run(['remote', 'unmirror'], repo);
+  assert.equal(un.code, 0, un.err);
+  assert.match(un.out, /已取消/);
+  assert.notEqual(sb.git(['config', '--local', '--get-all', 'remote.origin.pushurl'], repo).code, 0);
+});
+
+test('credential：set 管道写入 / list 探测 / remove 删除（store helper 沙箱，假 token）', () => {
+  const sb = makeSandbox();
+  const credFile = path.join(sb.home, 'creds').replace(/\\/g, '/');
+  sb.git(['config', '--global', 'credential.helper', `store --file ${credFile}`]);
+
+  const empty = sb.run(['credential', 'list']);
+  assert.equal(empty.code, 0, empty.err);
+  assert.match(empty.out, /尚无凭据账号选择器/);
+
+  // set：stdin 管道喂假 token（子进程非 TTY 自动走 stdin 分支）
+  const set = sb.run(['credential', 'set', 'example.com', 'corp-zhang'], sb.home, 'sandbox-token-not-real');
+  assert.equal(set.code, 0, set.err);
+  assert.match(set.out, /已保存 example\.com/);
+
+  // gitid 档案零 token 痕迹（credential 管道不触碰档案——此刻档案甚至尚不存在）
+  const cfgPath = path.join(sb.home, '.config/gitid/config.json');
+  assert.ok(!fs.existsSync(cfgPath) || !fs.readFileSync(cfgPath, 'utf8').includes('sandbox-token-not-real'));
+  // helper 侧确有凭据（store 文件明文本就是其语义）
+  assert.ok(fs.readFileSync(credFile, 'utf8').includes('corp-zhang'));
+
+  // 选择器 + current 展示
+  sb.run(['add', 'work', '--name', '张三', '--email', 'z@corp.com', '--account', 'example.com=corp-zhang']);
+  sb.run(['use', 'work']);
+  assert.equal(sb.git(['config', '--global', '--get', 'credential.https://example.com.username']).out, 'corp-zhang');
+
+  const list = sb.run(['credential', 'list']);
+  assert.equal(list.code, 0, list.err);
+  assert.match(list.out, /example\.com/);
+  assert.match(list.out, /corp-zhang/);
+  assert.match(list.out, /✓/);
+
+  const cur = sb.run(['current']);
+  assert.match(cur.out, /凭据账号/);
+  assert.match(cur.out, /corp-zhang/);
+
+  // 覆盖（修改）：同键再 set 换 token 成功
+  const re = sb.run(['credential', 'set', 'example.com', 'corp-zhang'], sb.home, 'sandbox-token-2-not-real');
+  assert.equal(re.code, 0, re.err);
+
+  // remove 后 helper 实存消失，选择器仍在
+  sb.run(['credential', 'remove', 'example.com', 'corp-zhang']);
+  const list2 = sb.run(['credential', 'list']);
+  assert.match(list2.out, /未存储/);
+});
+
+test('credential 选择器随身份全量覆盖：切换即清理', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'a', '--name', 'A', '--email', 'a@x.com', '--account', 'github.com=corp-zhang']);
+  sb.run(['add', 'b', '--name', 'B', '--email', 'b@x.com']);
+  sb.run(['use', 'a']);
+  assert.equal(sb.git(['config', '--global', '--get', 'credential.https://github.com.username']).out, 'corp-zhang');
+  sb.run(['use', 'b']);
+  assert.notEqual(sb.git(['config', '--global', '--get', 'credential.https://github.com.username']).code, 0);
+});
+
+test('credential：无 helper 拒绝 / 空 token / 坏 host / 坏 --account', () => {
+  const sb = makeSandbox(); // 干净 HOME + NOSYSTEM：无任何 helper
+  const r = sb.run(['credential', 'set', 'example.com', 'corp-zhang'], sb.home, 'sandbox-token-not-real');
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /credential\.helper/);
+
+  const credFile = path.join(sb.home, 'creds').replace(/\\/g, '/');
+  sb.git(['config', '--global', 'credential.helper', `store --file ${credFile}`]);
+  assert.notEqual(sb.run(['credential', 'set', 'example.com', 'u'], sb.home, '').code, 0); // 空 token
+  assert.notEqual(sb.run(['credential', 'set', 'not a host', 'u'], sb.home, 'x').code, 0); // 坏 host
+  assert.notEqual(sb.run(['add', 'x', '--name', 'a', '--email', 'a@b.c', '--account', 'noeq']).code, 0);
 });
 
 test('配置档案写入位置与原子性', () => {

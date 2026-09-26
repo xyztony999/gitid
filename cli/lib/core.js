@@ -73,6 +73,41 @@ function upsertIdentity(store, id, fields) {
   const exists = !!store.identities[id];
   const it = { name: fields.name, email: fields.email, signingkey: fields.signingkey || '' };
   if (fields.gpgsign === true) it.gpgsign = true;
+  if (fields.insteadOf !== undefined) {
+    if (!Array.isArray(fields.insteadOf)) throw new GitidError('insteadOf 需为 [{original, url}] 数组');
+    const seen = new Set();
+    const clean = [];
+    for (const p of fields.insteadOf) {
+      const original = String(p.original || '').trim();
+      const url = String(p.url || '').trim();
+      if (!original || !url || /\s/.test(original) || /\s/.test(url)) {
+        throw new GitidError(`insteadOf 需为不含空白的 原始地址=替换地址 对：${original || url || '（空）'} 不合法`);
+      }
+      if (original === url) throw new GitidError(`insteadOf 原始与替换地址不能相同：${url}`);
+      const k = `${original}=>${url}`;
+      if (!seen.has(k)) { seen.add(k); clean.push({ original, url }); }
+    }
+    if (clean.length) it.insteadOf = clean;
+    else delete it.insteadOf; // 显式传空数组 = 清除该身份的全部 URL 重写
+  }
+  if (fields.accounts !== undefined) {
+    // 凭据账号选择器（L1）：host=用户名，映射为 credential.<https://host>.username；
+    // 只选不存——token 本体永远在 helper/密钥服务（ADR-017）
+    if (!Array.isArray(fields.accounts)) throw new GitidError('accounts 需为 [{host, username}] 数组');
+    const seen = new Set();
+    const clean = [];
+    for (const a of fields.accounts) {
+      const host = String(a.host || '').trim().replace(/^\w+:\/\//, '').replace(/\/+$/, '');
+      const username = String(a.username || '').trim();
+      if (!host || !username || /\s/.test(host) || /\s/.test(username)) {
+        throw new GitidError(`account 需为不含空白的 host=用户名 对：${host || username || '（空）'} 不合法`);
+      }
+      const k = host.toLowerCase();
+      if (!seen.has(k)) { seen.add(k); clean.push({ host, username }); }
+    }
+    if (clean.length) it.accounts = clean;
+    else delete it.accounts; // 空数组 = 清除该身份的全部凭据选择器
+  }
   if (fields.extra && Object.keys(fields.extra).length) it.extra = fields.extra;
   store.identities[id] = it;
   return { store, exists };
@@ -118,13 +153,13 @@ function saveSettings(store, patch = {}) {
 
 // ---------- git 封装（cwd 可选，供桌面端操作任意仓库） ----------
 
-function git(args, { allowFail = false, cwd } = {}) {
-  const r = spawnSync('git', args, { encoding: 'utf8', cwd });
+function git(args, { allowFail = false, cwd, input, env } = {}) {
+  const r = spawnSync('git', args, { encoding: 'utf8', cwd, input, env });
   if (r.error) throw new GitidError('未找到 git 命令，请先安装 git');
   if (!allowFail && r.status !== 0) {
     throw new GitidError(`git ${args.join(' ')} 失败：${(r.stderr || '').trim()}`);
   }
-  return { ok: r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
+  return { ok: r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim(), status: r.status };
 }
 
 function scopeFlag(scope) { return scope === 'local' ? '--local' : '--global'; }
@@ -177,10 +212,44 @@ function readApplied(scope, store, { cwd } = {}) {
   };
 }
 
-// 全量覆盖语义：身份没有的键会被 unset（签名配置不残留，ADR-003）
-function applyIdentity(it, scope, { cwd } = {}) {
+// 身份携带的非身份键配置键集合：extra 自定义键 + insteadOf 生成的 url.<url>.insteadOf
+function insteadOfConfigKey(p) { return `url.${p.url}.insteadOf`; }
+
+function accountConfigKey(a) { return `credential.https://${a.host}.username`; }
+
+function extraConfigKeys(it) {
+  const keys = new Set(Object.keys((it && it.extra) || {}));
+  for (const p of (it && it.insteadOf) || []) keys.add(insteadOfConfigKey(p));
+  for (const a of (it && it.accounts) || []) keys.add(accountConfigKey(a));
+  return keys;
+}
+
+// 全量覆盖语义：身份没有的键（signingkey/gpgsign/extra/insteadOf）会被 unset，
+// 不残留上一身份的签名与 URL 重写配置（ADR-003/016）
+function applyIdentity(it, scope, { cwd, store } = {}) {
   const before = {};
-  for (const key of IDENTITY_KEYS) before[key] = cfgGet(scope, key, { cwd });
+  const watch = new Set(IDENTITY_KEYS);
+  for (const key of IDENTITY_KEYS) watch.add(key);
+  for (const key of extraConfigKeys(it)) watch.add(key);
+
+  // 上一身份（按切换前生效 name+email 匹配档案）的 extra/insteadOf 若本身份未再定义，
+  // 一并清除——防 URL 重写残留导致 push 被静默重定向（ADR-016）
+  const cleanupKeys = [];
+  if (store) {
+    const prevName = cfgGet(scope, 'user.name', { cwd });
+    const prevEmail = cfgGet(scope, 'user.email', { cwd });
+    const prevId = matchIdentity(store, prevName, prevEmail);
+    const prev = prevId ? store.identities[prevId] : null;
+    if (prev && prev !== it) {
+      const own = extraConfigKeys(it);
+      for (const key of extraConfigKeys(prev)) {
+        if (!own.has(key)) { cleanupKeys.push(key); watch.add(key); }
+      }
+    }
+  }
+  for (const key of watch) before[key] = cfgGet(scope, key, { cwd });
+
+  for (const key of cleanupKeys) cfgUnset(scope, key, { cwd });
 
   cfgSet(scope, 'user.name', it.name, { cwd });
   cfgSet(scope, 'user.email', it.email, { cwd });
@@ -189,6 +258,8 @@ function applyIdentity(it, scope, { cwd } = {}) {
   if (it.gpgsign === true) cfgSet(scope, 'commit.gpgsign', 'true', { cwd });
   else cfgUnset(scope, 'commit.gpgsign', { cwd });
   for (const [k, v] of Object.entries(it.extra || {})) cfgSet(scope, k, v, { cwd });
+  for (const p of it.insteadOf || []) cfgSet(scope, insteadOfConfigKey(p), p.original, { cwd });
+  for (const a of it.accounts || []) cfgSet(scope, accountConfigKey(a), a.username, { cwd });
 
   const changes = [];
   const record = (key, now) => {
@@ -199,10 +270,16 @@ function applyIdentity(it, scope, { cwd } = {}) {
   record('user.email', it.email);
   record('user.signingkey', it.signingkey || undefined);
   record('commit.gpgsign', it.gpgsign === true ? 'true' : undefined);
+  for (const [k, v] of Object.entries(it.extra || {})) record(k, v);
+  for (const p of it.insteadOf || []) record(insteadOfConfigKey(p), p.original);
+  for (const a of it.accounts || []) record(accountConfigKey(a), a.username);
+  for (const key of cleanupKeys) record(key, undefined);
   return changes;
 }
 
-function unsetIdentity(scope, { cwd } = {}) {
+function unsetIdentity(scope, { cwd, store } = {}) {
+  const name = cfgGet(scope, 'user.name', { cwd });
+  const email = cfgGet(scope, 'user.email', { cwd });
   const removed = [];
   for (const key of IDENTITY_KEYS) {
     if (cfgGet(scope, key, { cwd }) !== undefined) {
@@ -210,7 +287,203 @@ function unsetIdentity(scope, { cwd } = {}) {
       removed.push(key);
     }
   }
+  // 匹配到档案时，其 extra/insteadOf 一并清除；手配（无匹配档案）不归属任何身份，不动
+  if (store) {
+    const id = matchIdentity(store, name, email);
+    const it = id ? store.identities[id] : null;
+    if (it) {
+      for (const key of extraConfigKeys(it)) {
+        if (cfgGet(scope, key, { cwd }) !== undefined) {
+          cfgUnset(scope, key, { cwd });
+          removed.push(key);
+        }
+      }
+    }
+  }
   return removed;
+}
+
+// ---------- 远程与镜像推送（per-repo；remote 为仓库私有概念，不进全局 profile） ----------
+
+// 解析仓库本地 remote.*.url / remote.*.pushurl（多值）
+function getRemotes(cwd) {
+  const r = git(['config', '--local', '--get-regexp', '^remote\\..+\\.(url|pushurl)$'], { allowFail: true, cwd });
+  const map = new Map();
+  if (r.ok && r.out) {
+    for (const line of r.out.split('\n')) {
+      const m = line.match(/^remote\.(.+)\.(url|pushurl) (.+)$/);
+      if (!m) continue;
+      const [, name, kind, value] = m;
+      if (!map.has(name)) map.set(name, { name, url: '', pushurls: [] });
+      if (kind === 'url') map.get(name).url = value;
+      else map.get(name).pushurls.push(value);
+    }
+  }
+  const remotes = [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  for (const x of remotes) x.mirror = x.pushurls.length >= 2;
+  return remotes;
+}
+
+// 开启镜像推送：remote.<name>.pushurl 置为 [原始 push 目标, 镜像地址]，
+// git push 同时推两端；fetch（url）不受影响。重复调用以新镜像地址替换旧镜像
+function setMirrorPush(cwd, remoteName, mirrorUrl) {
+  const root = repoRoot(cwd);
+  if (!root) throw new GitidError(`不是 git 仓库：${cwd}`);
+  const url = String(mirrorUrl || '').trim();
+  if (!url || /\s/.test(url)) throw new GitidError(`镜像地址不合法：${mirrorUrl || '（空）'}`);
+  const remotes = getRemotes(root);
+  const remote = remotes.find((x) => x.name === remoteName);
+  if (!remote) throw new GitidError(`远程「${remoteName}」不存在。可用：${remotes.map((x) => x.name).join('、') || '（无）'}`);
+  const others = remote.pushurls.filter((u) => u !== url);
+  const original = others.length ? others[0] : remote.url;
+  if (!original) throw new GitidError(`远程「${remoteName}」缺少 fetch 地址（remote.${remoteName}.url）`);
+  if (original === url) throw new GitidError(`镜像地址与「${remoteName}」现有地址相同：${url}`);
+  if (remote.pushurls.length) git(['config', '--local', '--unset-all', `remote.${remoteName}.pushurl`], { allowFail: true, cwd: root });
+  git(['config', '--local', '--add', `remote.${remoteName}.pushurl`, original], { cwd: root });
+  git(['config', '--local', '--add', `remote.${remoteName}.pushurl`, url], { cwd: root });
+  return { name: remoteName, fetchUrl: remote.url, pushurls: [original, url] };
+}
+
+// 取消镜像推送：清除全部 pushurl，push 回到 fetch 地址
+function clearMirrorPush(cwd, remoteName) {
+  const root = repoRoot(cwd);
+  if (!root) throw new GitidError(`不是 git 仓库：${cwd}`);
+  const remotes = getRemotes(root);
+  const remote = remotes.find((x) => x.name === remoteName);
+  if (!remote) throw new GitidError(`远程「${remoteName}」不存在。可用：${remotes.map((x) => x.name).join('、') || '（无）'}`);
+  if (remote.pushurls.length) git(['config', '--local', '--unset-all', `remote.${remoteName}.pushurl`], { allowFail: true, cwd: root });
+  return { name: remoteName, fetchUrl: remote.url, removed: remote.pushurls.length };
+}
+
+// 生效的 URL 重写（url.<B>.insteadOf <A> → A 被重写为 B），本地覆盖合并全局。
+// 注意：git 变量名不区分大小写且返回时统一小写，故按 insteadof 匹配
+function listUrlRewrites({ cwd } = {}) {
+  const r = git(['config', '--get-regexp', '^url\\..+\\.insteadof$'], { allowFail: true, cwd });
+  if (!r.ok || !r.out) return [];
+  const out = [];
+  for (const line of r.out.split('\n')) {
+    const m = line.match(/^url\.(.+)\.insteadof (.+)$/i);
+    if (m) out.push({ original: m[2], url: m[1] });
+  }
+  return out;
+}
+
+// ---------- 凭据管道（ADR-017）：gitid 是 conduit 不是仓库 ----------
+// token 生命周期：stdin/输入 → 进程内存 → git credential 协议 → helper（GCM/libsecret/store）；
+// 不落 config.json、不落日志、不回显、不进任何 IPC 载荷。展示永远只有 host → username。
+
+// host 输入归一为 credential 协议三元组：裸 host 补 https://
+function parseCredBasis(hostInput) {
+  let s = String(hostInput || '').trim();
+  if (!s || /\s/.test(s)) throw new GitidError(`凭据 host 不合法：${hostInput || '（空）'}`);
+  if (!s.includes('://')) s = `https://${s}`;
+  const m = s.match(/^(https?):\/\/([^/?#]+)/);
+  if (!m) throw new GitidError(`凭据 host 仅支持 http(s)：${hostInput}`);
+  return { protocol: m[1], host: m[2], basis: `${m[1]}://${m[2]}` };
+}
+
+function credentialInput(obj) {
+  return Object.entries(obj).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+}
+
+function hasCredentialHelper({ cwd } = {}) {
+  const r = git(['config', '--get', 'credential.helper'], { allowFail: true, cwd });
+  return r.ok && !!r.out;
+}
+
+// 只读探测：返回 {host, username, stored}；password 读到即丢，绝不向上层返回。
+// 全部交互通道关闭（终端/askpass/GCM GUI），查不到即安静返回 stored:false
+function credentialProbe(hostInput, { username, cwd } = {}) {
+  const { protocol, host } = parseCredBasis(hostInput);
+  const query = { protocol, host };
+  if (username) query.username = username;
+  const env = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: ':',
+    GCM_INTERACTIVE: 'never',
+  };
+  const r = git(['credential', 'fill'], { allowFail: true, cwd, input: credentialInput(query), env });
+  if (!r.ok || !r.out) return { host, username: username || null, stored: false };
+  let found = null;
+  for (const line of r.out.split('\n')) {
+    const m = line.match(/^username=(.+)$/);
+    if (m) found = m[1];
+    // password 行刻意丢弃
+  }
+  if (!found) return { host, username: username || null, stored: false };
+  return { host, username: found, stored: true };
+}
+
+// 保存/覆盖凭据（同 host+username 覆盖）：token 由调用方保证来自 stdin/输入框
+function credentialStore(hostInput, username, token, { cwd } = {}) {
+  const { protocol, host } = parseCredBasis(hostInput);
+  const user = String(username || '').trim();
+  if (!user || /\s/.test(user)) throw new GitidError(`用户名不合法：${username || '（空）'}`);
+  if (!token || /[\r\n]/.test(token)) throw new GitidError('token 不能为空，且不能包含换行');
+  if (!hasCredentialHelper({ cwd })) {
+    throw new GitidError('未配置 credential.helper，token 将无处保存。先执行：git config --global credential.helper manager（或 libsecret / store）');
+  }
+  git(['credential', 'approve'], {
+    cwd,
+    input: credentialInput({ protocol, host, username: user, password: token }),
+  });
+  return { host, username: user };
+}
+
+// 删除凭据（erase）；未传 username 时按 helper 语义匹配该 host
+function credentialErase(hostInput, username, { cwd } = {}) {
+  const { protocol, host } = parseCredBasis(hostInput);
+  const query = { protocol, host };
+  const user = username ? String(username).trim() : '';
+  if (user) query.username = user;
+  git(['credential', 'reject'], { cwd, input: credentialInput(query) });
+  return { host, username: user || null };
+}
+
+// 交互式登录：放开交互跑 fill（GCM 弹自身 GUI / 终端询问），成功后 approve 回写。
+// token 仅在内存中转（fill stdout → approve stdin），不落任何持久层
+function credentialLogin(hostInput, username, { cwd } = {}) {
+  const { protocol, host } = parseCredBasis(hostInput);
+  if (!hasCredentialHelper({ cwd })) {
+    throw new GitidError('未配置 credential.helper，无法登录。先执行：git config --global credential.helper manager');
+  }
+  const query = { protocol, host };
+  if (username) query.username = String(username).trim();
+  const r = git(['credential', 'fill'], { allowFail: true, cwd, input: credentialInput(query) });
+  if (!r.ok || !r.out) throw new GitidError(`登录未完成（取消或 helper 不可用）：${r.err || host}`);
+  const got = {};
+  for (const line of r.out.split('\n')) {
+    const m = line.match(/^(username|password)=(.*)$/);
+    if (m) got[m[1]] = m[2];
+  }
+  if (!got.username || !got.password) throw new GitidError('登录未返回完整凭据（username/password 缺失）');
+  git(['credential', 'approve'], {
+    cwd,
+    input: credentialInput({ protocol, host, username: got.username, password: got.password }),
+  });
+  return { host, username: got.username };
+}
+
+// 凭据总览：以配置中的选择器（credential.<basis>.username）为线索逐个探测；
+// credential 协议无"枚举"操作，只能展示已知 host（协议能力边界，如实声明）
+function credentialList({ cwd } = {}) {
+  const r = git(['config', '--global', '--get-regexp', '^credential\\..+\\.username$'], { allowFail: true, cwd });
+  const rows = [];
+  if (r.ok && r.out) {
+    for (const line of r.out.split('\n')) {
+      const m = line.match(/^credential\.(https?:\/\/[^ ]+)\.username (.+)$/);
+      if (!m) continue;
+      rows.push({ basis: m[1], host: m[1].replace(/^https?:\/\//, ''), selector: m[2] });
+    }
+  }
+  rows.sort((a, b) => a.host.localeCompare(b.host));
+  for (const row of rows) {
+    const p = credentialProbe(row.host, { username: row.selector, cwd });
+    row.stored = p.stored;
+    row.storedUsername = p.username;
+  }
+  return rows;
 }
 
 // ---------- 仓库扫描 ----------
@@ -253,13 +526,19 @@ function scanRepos(store, root, depth = 6) {
     let status = 'ok';
     if (effective.name === undefined || effective.email === undefined) status = 'missing';
     else if (!identityId) status = 'unknown';
-    return { path: repo, rel: path.relative(base, repo) || '.', local, effective, hasLocal, identityId, status };
+    const remotes = getRemotes(repo).map((x) => {
+      // push 将用的凭据账号（生效选择器，含仓库本地覆盖）；仅 http(s) 远程有此语义
+      const m = (x.url || '').match(/^https?:\/\/[^/?#]+/);
+      return m ? { ...x, account: cfgGetEffective(`credential.${m[0]}.username`, { cwd: repo }) } : x;
+    });
+    return { path: repo, rel: path.relative(base, repo) || '.', local, effective, hasLocal, identityId, status, remotes };
   });
   const summary = {
     total: rows.length,
     withLocal: rows.filter((r) => r.hasLocal).length,
     missing: rows.filter((r) => r.status === 'missing').length,
     unknown: rows.filter((r) => r.status === 'unknown').length,
+    mirrored: rows.filter((r) => r.remotes.some((x) => x.mirror)).length,
   };
   return { rows, summary };
 }
@@ -287,6 +566,17 @@ module.exports = {
   readApplied,
   applyIdentity,
   unsetIdentity,
+  getRemotes,
+  setMirrorPush,
+  clearMirrorPush,
+  listUrlRewrites,
+  parseCredBasis,
+  hasCredentialHelper,
+  credentialProbe,
+  credentialStore,
+  credentialErase,
+  credentialLogin,
+  credentialList,
   findRepos,
   scanRepos,
 };

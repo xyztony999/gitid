@@ -87,6 +87,100 @@ test('core 设置：默认扫描目录读写与校验（沙箱）', () => {
   assert.match(out.thrown, /scanDepth/);
 });
 
+test('core：insteadOf 覆盖语义与远程镜像管理（沙箱）', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gitid-desktop-ext-'));
+  const repo = path.join(home, 'Projects', 'demo');
+  fs.mkdirSync(repo, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    GITID_CONFIG: path.join(home, '.config/gitid/config.json'),
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const script = `
+    const { spawnSync } = require('node:child_process');
+    const core = require(${JSON.stringify(path.resolve(here, '../main/core.js'))});
+    const store = core.loadStore();
+    core.upsertIdentity(store, 'mirror', { name: '张三', email: 'z@corp.com',
+      insteadOf: [{ original: 'https://github.com/', url: 'https://gh.example.com/' }] });
+    core.upsertIdentity(store, 'plain', { name: '李四', email: 'li@x.com', extra: { 'user.company': 'acme' } });
+    core.saveStore(store);
+    const s = core.loadStore();
+    core.applyIdentity(core.getIdentity(s, 'mirror'), 'global', { store: s });
+    const applied = core.cfgGet('global', 'url.https://gh.example.com/.insteadOf');
+    const appliedChanges = core.applyIdentity(core.getIdentity(s, 'plain'), 'global', { store: s });
+    const cleaned = core.cfgGet('global', 'url.https://gh.example.com/.insteadOf') === undefined;
+    const extraOn = core.cfgGet('global', 'user.company');
+    spawnSync('git', ['init', '-q'], { cwd: ${JSON.stringify(repo)}, env: process.env });
+    spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/example/demo.git'], { cwd: ${JSON.stringify(repo)}, env: process.env });
+    const before = core.getRemotes(${JSON.stringify(repo)});
+    core.setMirrorPush(${JSON.stringify(repo)}, 'origin', 'https://gitee.com/example/demo.git');
+    const mirrored = core.getRemotes(${JSON.stringify(repo)});
+    core.clearMirrorPush(${JSON.stringify(repo)}, 'origin');
+    const after = core.getRemotes(${JSON.stringify(repo)});
+    console.log(JSON.stringify({
+      applied, cleaned, extraOn,
+      changeKeys: appliedChanges.map((c) => c.key),
+      before: before.map((r) => ({ name: r.name, mirror: r.mirror, pushurls: r.pushurls })),
+      mirrored: mirrored.map((r) => ({ name: r.name, mirror: r.mirror, pushurls: r.pushurls })),
+      after: after.map((r) => ({ name: r.name, mirror: r.mirror, pushurls: r.pushurls })),
+    }));
+  `;
+  const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim());
+  assert.equal(out.applied, 'https://github.com/');
+  assert.equal(out.cleaned, true); // 切到 plain 后上一身份的重写被清除
+  assert.equal(out.extraOn, 'acme');
+  assert.ok(out.changeKeys.some((k) => k.startsWith('url.') && k.endsWith('.insteadOf')));
+  assert.deepEqual(out.before, [{ name: 'origin', mirror: false, pushurls: [] }]);
+  assert.deepEqual(out.mirrored, [{
+    name: 'origin', mirror: true,
+    pushurls: ['https://github.com/example/demo.git', 'https://gitee.com/example/demo.git'],
+  }]);
+  assert.deepEqual(out.after, [{ name: 'origin', mirror: false, pushurls: [] }]);
+});
+
+test('core：凭据管道与选择器（沙箱 store helper，假 token）', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gitid-desktop-cred-'));
+  const env = {
+    ...process.env,
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    GITID_CONFIG: path.join(home, '.config/gitid/config.json'),
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const credFile = path.join(home, 'creds').replace(/\\/g, '/');
+  const script = `
+    const { spawnSync } = require('node:child_process');
+    const core = require(${JSON.stringify(path.resolve(here, '../main/core.js'))});
+    spawnSync('git', ['config', '--global', 'credential.helper', 'store --file ${credFile}'], { env: process.env });
+    core.credentialStore('example.com', 'corp-zhang', 'sandbox-token-not-real');
+    const probed = core.credentialProbe('example.com', { username: 'corp-zhang' });
+    const miss = core.credentialProbe('other.example');
+    core.credentialErase('example.com', 'corp-zhang');
+    const gone = core.credentialProbe('example.com', { username: 'corp-zhang' });
+    const store = core.loadStore();
+    core.upsertIdentity(store, 'work', { name: '张三', email: 'z@corp.com', accounts: [{ host: 'example.com', username: 'corp-zhang' }] });
+    core.saveStore(store);
+    core.applyIdentity(core.getIdentity(core.loadStore(), 'work'), 'global', { store: core.loadStore() });
+    const selector = core.cfgGet('global', 'credential.https://example.com.username');
+    console.log(JSON.stringify({
+      probed, miss: miss.stored, gone: gone.stored, selector,
+      leaked: JSON.stringify(core.loadStore()).includes('sandbox-token-not-real'),
+    }));
+  `;
+  const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim());
+  assert.deepEqual(out.probed, { host: 'example.com', username: 'corp-zhang', stored: true });
+  assert.equal(out.miss, false);
+  assert.equal(out.gone, false);
+  assert.equal(out.selector, 'corp-zhang');
+  assert.equal(out.leaked, false); // token 绝不进身份档案
+});
+
 // 渲染层 → IPC → core → git 全链路（真实 Electron，经 preload 桥；无 xvfb-run 则跳过）
 test('GITID_DRIVE 集成验证：仓库单独设置身份 / 改回继承全局（沙箱）', { timeout: 90000 }, (t) => {
   const hasXvfb = spawnSync('which', ['xvfb-run']).status === 0;

@@ -27,6 +27,9 @@
           <a-tab-pane key="repos" tab="仓库审计">
             <RepoView :store="store" @changed="refresh" />
           </a-tab-pane>
+          <a-tab-pane key="credentials" tab="凭据">
+            <CredentialView />
+          </a-tab-pane>
         </a-tabs>
       </a-layout-content>
     </a-layout>
@@ -40,6 +43,7 @@ import { ReloadOutlined } from '@ant-design/icons-vue';
 import zhCN from 'ant-design-vue/es/locale/zh_CN';
 import IdentityView from './views/IdentityView.vue';
 import RepoView from './views/RepoView.vue';
+import CredentialView from './views/CredentialView.vue';
 import { api } from './api.js';
 
 const flags = (window.gitid && window.gitid.getFlags) ? window.gitid.getFlags() : { tab: '', scanRoot: '' };

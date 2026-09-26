@@ -54,6 +54,23 @@
             <span class="mono">{{ record.rel }}</span>
           </a-tooltip>
         </template>
+        <template v-else-if="column.key === 'remotes'">
+          <a-space :size="4" wrap>
+            <template v-for="r in record.remotes || []" :key="r.name">
+              <a-tooltip v-if="!r.mirror" :title="`${r.url}${r.account ? `\n凭据账号：${r.account}` : ''}`">
+                <a-tag class="mono remote-tag">
+                  {{ r.name }}<span v-if="r.account" class="dim">@{{ r.account }}</span>
+                </a-tag>
+              </a-tooltip>
+              <a-tooltip v-else :title="`push 同时推：\n${r.pushurls.join('\n')}${r.account ? `\n凭据账号：${r.account}` : ''}`">
+                <a-tag class="mono remote-tag" color="blue">{{ r.name }} ⊕</a-tag>
+              </a-tooltip>
+            </template>
+            <a-button type="link" size="small" @click="openMirror(record)">
+              {{ (record.remotes || []).some((r) => r.mirror) ? '管理' : '镜像' }}
+            </a-button>
+          </a-space>
+        </template>
         <template v-else-if="column.key === 'identity'">
           <a-select
             :value="selectValue(record)"
@@ -77,13 +94,52 @@
       </template>
     </a-table>
     <div v-else-if="!scanned" class="hint dim">
-      扫描目录查看各仓库生效身份；每个仓库可独立选择「继承全局」或单独设置本地身份。
+      扫描目录查看各仓库生效身份；每个仓库可独立选择「继承全局」或单独设置本地身份，并管理远程镜像推送。
     </div>
+
+    <a-modal
+      v-model:open="mirrorModal.open"
+      :title="mirrorModal.repo ? `镜像推送：${mirrorModal.repo.rel}` : '镜像推送'"
+      ok-text="启用镜像"
+      cancel-text="关闭"
+      :confirm-loading="mirrorModal.loading"
+      @ok="enableMirror"
+    >
+      <a-form layout="vertical" class="mirror-form">
+        <a-alert
+          v-if="mirrorModal.repo && !(mirrorModal.repo.remotes || []).length"
+          type="warning"
+          show-icon
+          message="该仓库尚无远程，先在仓库内 git remote add <name> <url>"
+          class="mb"
+        />
+        <a-form-item label="远程">
+          <a-select v-model:value="mirrorModal.remote" style="width: 100%">
+            <a-select-option
+              v-for="r in (mirrorModal.repo && mirrorModal.repo.remotes) || []"
+              :key="r.name"
+              :value="r.name"
+            >
+              {{ r.name }}{{ r.mirror ? '（已镜像 ⊕）' : '' }}{{ r.url ? ` — ${r.url}` : '' }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="镜像地址（git push 时与原地址同时推送）" required>
+          <a-input v-model:value="mirrorModal.url" placeholder="https://gitee.com/<user>/<repo>.git" />
+        </a-form-item>
+        <a-form-item v-if="mirrorTarget && mirrorTarget.mirror">
+          <a-button danger size="small" @click="disableMirror">取消该远程的镜像推送</a-button>
+        </a-form-item>
+        <div class="dim mirror-note">
+          凭据仍由 git 自身（GCM/SSH）管理；fetch 不受影响，仅 push 同时推两端。
+        </div>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { message } from 'ant-design-vue';
 import { FolderOutlined, SaveOutlined, ScanOutlined } from '@ant-design/icons-vue';
 import { api } from '../api.js';
@@ -116,7 +172,8 @@ watch(() => props.store, (s) => {
 const columns = [
   { title: '状态', key: 'status', width: 96 },
   { title: '仓库', key: 'repo', ellipsis: true },
-  { title: '仓库身份（继承全局 / 单独设置）', key: 'identity', width: 300 },
+  { title: '远程/镜像', key: 'remotes', width: 190 },
+  { title: '仓库身份（继承全局 / 单独设置）', key: 'identity', width: 280 },
   { title: '生效配置', key: 'effective', ellipsis: true },
 ];
 
@@ -154,7 +211,7 @@ function selectValue(record) {
 const summaryText = computed(() => {
   if (!summary.value) return '';
   const s = summary.value;
-  return `共 ${s.total} 个仓库 · ${s.withLocal} 个单独设置 · ${s.missing} 个配置缺失${s.unknown ? ` · ${s.unknown} 个未匹配档案` : ''}`;
+  return `共 ${s.total} 个仓库 · ${s.withLocal} 个单独设置 · ${s.missing} 个配置缺失${s.unknown ? ` · ${s.unknown} 个未匹配档案` : ''}${s.mirrored ? ` · ${s.mirrored} 个镜像推送` : ''}`;
 });
 
 async function scan() {
@@ -223,6 +280,46 @@ async function changeRepoIdentity(record, val) {
   }
 }
 
+// 镜像推送管理（per-repo：remote.<name>.pushurl 多值，push 同时推两端）
+const mirrorModal = reactive({ open: false, repo: null, remote: 'origin', url: '', loading: false });
+const mirrorTarget = computed(() => {
+  const list = (mirrorModal.repo && mirrorModal.repo.remotes) || [];
+  return list.find((r) => r.name === mirrorModal.remote) || null;
+});
+
+function openMirror(record) {
+  mirrorModal.repo = record;
+  mirrorModal.remote = (record.remotes && record.remotes[0] && record.remotes[0].name) || 'origin';
+  mirrorModal.url = '';
+  mirrorModal.open = true;
+}
+
+async function enableMirror() {
+  if (!mirrorModal.url.trim()) { message.warning('请填写镜像地址'); return; }
+  mirrorModal.loading = true;
+  try {
+    await api.setMirror(mirrorModal.repo.path, mirrorModal.remote, mirrorModal.url.trim());
+    message.success(`已开启 ${mirrorModal.repo.rel} · ${mirrorModal.remote} 镜像推送（git push 同时推两端）`);
+    mirrorModal.open = false;
+    await scan();
+  } catch (e) {
+    message.error(e.message);
+  } finally {
+    mirrorModal.loading = false;
+  }
+}
+
+async function disableMirror() {
+  try {
+    await api.clearMirror(mirrorModal.repo.path, mirrorModal.remote);
+    message.success(`已取消 ${mirrorModal.repo.rel} · ${mirrorModal.remote} 镜像推送`);
+    mirrorModal.open = false;
+    await scan();
+  } catch (e) {
+    message.error(e.message);
+  }
+}
+
 // 集成验证用：GITID_SCAN_ROOT 指定时自动扫描
 onMounted(() => {
   const flags = (window.gitid && window.gitid.getFlags) ? window.gitid.getFlags() : {};
@@ -237,4 +334,6 @@ onMounted(() => {
 .hint { padding: 32px 0; text-align: center; }
 .mb { margin-bottom: 12px; }
 .manual-local :deep(.ant-select-selection-item) { color: #d46b08; }
+.remote-tag { font-size: 12px; margin-right: 0; }
+.mirror-note { font-size: 12px; margin-top: -8px; }
 </style>
