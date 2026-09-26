@@ -1,6 +1,8 @@
 {
   "env": {
     "ACTIVE_PROFILE": "gitid",
-    "ACTIVE_STACKS": ""
+    "ACTIVE_STACKS": "node-cli,electron-vue3",
+    "CLI_ROOT": "cli",
+    "DESKTOP_ROOT": "desktop"
   }
 }

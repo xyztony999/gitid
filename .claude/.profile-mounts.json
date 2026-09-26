@@ -1,11 +1,57 @@
 {
   "apiVersion": 1,
   "active": "gitid",
-  "stacks": [],
-  "mounts": [],
+  "stacks": [
+    "node-cli",
+    "electron-vue3"
+  ],
+  "mounts": [
+    {
+      "layer": "node-cli",
+      "src": "profiles/node-cli/skills/cli-specs",
+      "dst": ".claude/skills/cli-specs",
+      "mode": "copy"
+    },
+    {
+      "layer": "node-cli",
+      "src": "profiles/node-cli/agents/cli-orchestrator.md",
+      "dst": ".claude/agents/cli-orchestrator.md",
+      "mode": "copy"
+    },
+    {
+      "layer": "node-cli",
+      "src": "profiles/node-cli/rules/node-cli-rules.md",
+      "dst": ".claude/rules/node-cli-rules.md",
+      "mode": "copy"
+    },
+    {
+      "layer": "electron-vue3",
+      "src": "profiles/electron-vue3/skills/desktop-specs",
+      "dst": ".claude/skills/desktop-specs",
+      "mode": "copy"
+    },
+    {
+      "layer": "electron-vue3",
+      "src": "profiles/electron-vue3/agents/desktop-orchestrator.md",
+      "dst": ".claude/agents/desktop-orchestrator.md",
+      "mode": "copy"
+    },
+    {
+      "layer": "electron-vue3",
+      "src": "profiles/electron-vue3/rules/electron-vue3-rules.md",
+      "dst": ".claude/rules/electron-vue3-rules.md",
+      "mode": "copy"
+    },
+    {
+      "layer": "gitid",
+      "src": "profiles/gitid/rules/product-rules.md",
+      "dst": ".claude/rules/product-rules.md",
+      "mode": "copy"
+    }
+  ],
   "claudemd_imports": [
     "@profiles/gitid/CLAUDE.md"
   ],
   "created_with": "engine-cli 0.3.0",
-  "ts": "2026-09-26T16:09:17.689Z"
+  "ts": "2026-09-26T16:33:15.256Z"
 }

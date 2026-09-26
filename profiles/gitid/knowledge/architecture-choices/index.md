@@ -7,8 +7,9 @@
 | 共用核心 | `cli/lib/core.js` | UI 无关：档案存取 + git 配置读写 + 仓库扫描（唯一事实源，ADR-009） |
 | CLI | `cli/`（bin/ 入口 + test/ e2e） | 交互与展示层；`npm install -g ./cli` 安装 |
 | 桌面端 | `desktop/` | Electron + Vue3 + AntD，见下节 |
-| 引擎资产 | `engine/` + `.claude/` + `profiles/{java-microservice,vue3-engine}` | 自 ai-project-engine 继承，本仓库即该引擎的 gitid 实例仓 |
-| 业务 profile | `profiles/gitid/` | 知识库 + 工作区（本目录） |
+| 引擎 | ai-project-engine 插件（dev-ai-project-engine，插件模式） | 引擎根=插件 payload（含 engine-manifest.json）；本仓不持有引擎核心（2026-09-18 拆出），挂载产物落 `.claude/` |
+| 技术栈 profile | `profiles/node-cli/`（CLI 工程栈）+ `profiles/electron-vue3/`（桌面端工程栈） | 栈规范包：Gate 2 规则/规格 skill/编排 agent，随业务 depends 激活 |
+| 业务 profile | `profiles/gitid/` | 知识库 + 工作区（本目录）+ 产品不变量（rules/product-rules.md） |
 
 ## 桌面端结构（desktop/）
 
@@ -27,7 +28,7 @@
 | Node | ≥ 18（开发机 v22） | readline/promises、node:test |
 | git | ≥ 2.x（开发机 2.25 验证） | 未使用 2.32+ 特性（如 GIT_CONFIG_GLOBAL） |
 | Electron | 33.x（linux-arm64 官方预编译） | AppImage 打包经 electron-builder 25 |
-| Vue / AntD | Vue 3.5 / ant-design-vue 4.2 | vite 5 构建，与 vue3-engine 栈同构 |
+| Vue / AntD | Vue 3.5 / ant-design-vue 4.2 | vite 5 构建（electron-vue3 栈） |
 | 依赖 | CLI 运行时 0 依赖；桌面端仅 vue/antd/icons | 渲染层 bundle 后无运行时 node_modules 依赖 |
 
 ## cli 内部结构

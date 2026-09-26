@@ -2,7 +2,7 @@
 
 ## Profile 绑定
 
-当前激活：**gitid**（business，无技术栈依赖）
+当前激活：**gitid**（business，depends: node-cli, electron-vue3）
 
 @profiles/gitid/CLAUDE.md
 

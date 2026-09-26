@@ -3,8 +3,8 @@ profile:
   name: gitid
   type: business
   title: gitid — Git 多身份管理器
-  # 纯 Node CLI，暂无匹配的技术栈 profile；如后续引入 Node 工程化规范，按 engine/03-extension-guide.md §4 新增 node-cli 栈
-  depends: []
+  # 双栈：CLI（node-cli）+ 桌面端（electron-vue3）；栈规范随栈分发，本 profile 只持业务知识/工作区/产品不变量
+  depends: [node-cli, electron-vue3]
 knowledge:
   inject: CLAUDE.md
   sections:
@@ -30,3 +30,6 @@ slots:
   cli_entry: cli/bin/gitid.js
   node_engines: ">=18"
   config_path_default: ~/.config/gitid/config.json
+# 产品级不变量（use 全量覆盖/凭据零接触/git 唯一事实源等）随业务层挂载
+assets:
+  rules: [rules/product-rules.md]

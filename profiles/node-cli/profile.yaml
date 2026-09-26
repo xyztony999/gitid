@@ -1,0 +1,22 @@
+apiVersion: 1
+profile:
+  name: node-cli
+  type: techstack
+  title: Node.js CLI 工程栈（Node ≥18 / CommonJS / 零依赖 / node --test 沙箱 e2e）
+  depends: []
+stack:
+  layers: [backend]
+  requires_env: [CLI_ROOT]          # CLI 代码根（相对仓根，如 "cli"）；{stack.code_root} 槽位来源
+  build:
+    command: "npm --prefix {module} test"
+    module_pattern: "{module}"      # 本仓可构建模块即目录名（cli / desktop），恒等映射
+  codegen:
+    orchestrator_agent: agents/cli-orchestrator.md
+    specs: skills/cli-specs/SKILL.md
+    api_spec: skills/cli-specs/SKILL.md   # CLI 的"API 契约"= 命令行界面 + git config 键语义，与 specs 同入口
+  validation:
+    rules: [rules/node-cli-rules.md]
+assets:
+  rules: [rules/node-cli-rules.md]
+  skills: [skills/cli-specs]
+  agents: [agents/cli-orchestrator.md]

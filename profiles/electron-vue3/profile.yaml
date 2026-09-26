@@ -1,0 +1,22 @@
+apiVersion: 1
+profile:
+  name: electron-vue3
+  type: techstack
+  title: Electron + Vue3 + AntD 桌面端工程栈（Electron 33 / Vue 3.5 / ant-design-vue 4.2 / Vite 5）
+  depends: []
+stack:
+  layers: [frontend]
+  requires_env: [DESKTOP_ROOT]     # 桌面端代码根（相对仓根，如 "desktop"）；{stack.frontend_root} 槽位来源
+  build:
+    command: "npm --prefix {module} test"   # 含 sync-core 核心一致性比对 + 沙箱应用测试；渲染层构建为 vite build
+    module_pattern: "{module}"
+  codegen:
+    orchestrator_agent: agents/desktop-orchestrator.md
+    frontend_agent: agents/desktop-orchestrator.md   # F1-F4 前端编排槽位（pipeline agent 消费）
+    specs: skills/desktop-specs/SKILL.md
+  validation:
+    rules: [rules/electron-vue3-rules.md]
+assets:
+  rules: [rules/electron-vue3-rules.md]
+  skills: [skills/desktop-specs]
+  agents: [agents/desktop-orchestrator.md]
