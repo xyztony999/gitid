@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="x-gitid-dev" content="1" />
     <title>gitid — Git 多身份管理器</title>
+    <script>
+      // 首帧前预置暗色类，避免深色系统上闪白（App.vue 挂载后接管同步）
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        document.documentElement.classList.add('dark');
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

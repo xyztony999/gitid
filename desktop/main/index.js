@@ -5,7 +5,7 @@
  * 职责：窗口/托盘/IPC/档案监听；全部业务逻辑在 core.js（与 CLI 共用）。
  */
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, Notification, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, Notification, nativeImage, nativeTheme } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -42,6 +42,8 @@ function createWindow() {
     minHeight: 600,
     icon: path.join(__dirname, '..', 'build', 'icon.png'),
     autoHideMenuBar: true,
+    // 窗口原生底色跟随系统主题，避免深色系统上启动/过滚动闪白
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1115' : '#f5f6f8',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -83,6 +85,11 @@ function createWindow() {
     });
   }
 }
+
+// 系统主题切换时同步窗口原生底色（渲染层各自经 prefers-color-scheme 跟随）
+nativeTheme.on('updated', () => {
+  if (mainWindow) mainWindow.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#0f1115' : '#f5f6f8');
+});
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {

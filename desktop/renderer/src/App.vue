@@ -1,5 +1,5 @@
 <template>
-  <a-config-provider :locale="zhCN">
+  <a-config-provider :locale="zhCN" :theme="themeConfig">
     <a-layout class="app">
       <a-layout-header class="app-header">
         <div class="brand">
@@ -37,14 +37,25 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { message } from 'ant-design-vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { message, theme } from 'ant-design-vue';
 import { ReloadOutlined } from '@ant-design/icons-vue';
 import zhCN from 'ant-design-vue/es/locale/zh_CN';
 import IdentityView from './views/IdentityView.vue';
 import RepoView from './views/RepoView.vue';
 import CredentialView from './views/CredentialView.vue';
 import { api } from './api.js';
+
+// 深色模式：跟随系统（Electron 下 prefers-color-scheme 映射 nativeTheme/OS）
+const dark = ref(typeof window.matchMedia === 'function'
+  && window.matchMedia('(prefers-color-scheme: dark)').matches);
+const themeConfig = computed(() => ({
+  algorithm: dark.value ? theme.darkAlgorithm : theme.defaultAlgorithm,
+}));
+const mql = typeof window.matchMedia === 'function'
+  ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+const onSchemeChange = (e) => { dark.value = e.matches; };
+watch(dark, (v) => document.documentElement.classList.toggle('dark', v), { immediate: true });
 
 const flags = (window.gitid && window.gitid.getFlags) ? window.gitid.getFlags() : { tab: '', scanRoot: '' };
 const tab = ref(flags.tab === 'repos' ? 'repos' : 'identities');
@@ -75,17 +86,24 @@ async function refresh() {
 
 let off = null;
 onMounted(async () => {
+  if (mql) mql.addEventListener('change', onSchemeChange);
   await refresh();
   // CLI 侧改动（gitid add/use 等）实时同步到界面
   off = api.onStoreUpdated((payload) => { store.value = payload; });
 });
-onUnmounted(() => off && off());
+onUnmounted(() => {
+  if (mql) mql.removeEventListener('change', onSchemeChange);
+  if (off) off();
+});
 </script>
 
 <style>
 * { margin: 0; padding: 0; }
+:root { --app-bg: #f5f6f8; }
+html.dark { --app-bg: #0f1115; }
 html, body, #app { height: 100%; }
-.app { height: 100%; background: #f5f6f8; }
+body { background: var(--app-bg); }
+.app { height: 100%; background: var(--app-bg); }
 
 .app-header {
   display: flex;
