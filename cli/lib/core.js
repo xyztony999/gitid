@@ -428,6 +428,7 @@ function credentialStore(hostInput, username, token, { cwd } = {}) {
     cwd,
     input: credentialInput({ protocol, host, username: user, password: token }),
   });
+  noteCredentialHost(host, user); // 非密钥线索：让 list/凭据页"看得到"这次保存（协议无枚举）
   return { host, username: user };
 }
 
@@ -438,6 +439,7 @@ function credentialErase(hostInput, username, { cwd } = {}) {
   const user = username ? String(username).trim() : '';
   if (user) query.username = user;
   git(['credential', 'reject'], { cwd, input: credentialInput(query) });
+  dropCredentialHost(host, user || null);
   return { host, username: user || null };
 }
 
@@ -462,24 +464,67 @@ function credentialLogin(hostInput, username, { cwd } = {}) {
     cwd,
     input: credentialInput({ protocol, host, username: got.username, password: got.password }),
   });
+  noteCredentialHost(host, got.username);
   return { host, username: got.username };
 }
 
-// 凭据总览：以配置中的选择器（credential.<basis>.username）为线索逐个探测；
-// credential 协议无"枚举"操作，只能展示已知 host（协议能力边界，如实声明）
+// ---------- 凭据线索（非密钥）：login/set 成功后记 host+username，list 以此补足枚举 ----------
+// git credential 协议没有"枚举钥匙串"能力，只能按线索点名探测；线索=配置选择器+此处记录。
+// 只存 host/username（与展示信息相同，非密钥），失败静默——线索记录不影响凭据操作本身
+
+function noteCredentialHost(host, username) {
+  try {
+    const store = loadStore();
+    if (!Array.isArray(store.credentialHosts)) store.credentialHosts = [];
+    const list = store.credentialHosts.filter(
+      (x) => !(String(x.host) === String(host) && String(x.username) === String(username)),
+    );
+    list.push({ host: String(host), username: String(username) });
+    store.credentialHosts = list.slice(-50); // 防无限增长
+    saveStore(store);
+  } catch { /* 线索记录失败不致命 */ }
+}
+
+function dropCredentialHost(host, username) {
+  try {
+    const store = loadStore();
+    if (!Array.isArray(store.credentialHosts)) return;
+    store.credentialHosts = store.credentialHosts.filter(
+      (x) => x.host !== host || (username !== null && x.username !== username),
+    );
+    saveStore(store);
+  } catch { /* 线索记录失败不致命 */ }
+}
+
+// 凭据总览：以两类非密钥线索点名探测——① 配置中的选择器（credential.<basis>.username，
+// 身份写入或手配）；② login/set 记录的 credentialHosts。credential 协议无"枚举"操作，
+// 钥匙串里还有什么无从得知，只能展示已知线索（协议能力边界，如实声明）
 function credentialList({ cwd } = {}) {
+  const entries = new Map(); // key: host|探测用户名
+  const add = (host, username, selector) => {
+    const key = `${host}|${username || ''}`;
+    const cur = entries.get(key) || { host, selector: null, probeUser: username };
+    if (selector) cur.selector = selector;
+    entries.set(key, cur);
+  };
   const r = git(['config', '--global', '--get-regexp', '^credential\\..+\\.username$'], { allowFail: true, cwd });
-  const rows = [];
   if (r.ok && r.out) {
     for (const line of r.out.split('\n')) {
       const m = line.match(/^credential\.(https?:\/\/[^ ]+)\.username (.+)$/);
       if (!m) continue;
-      rows.push({ basis: m[1], host: m[1].replace(/^https?:\/\//, ''), selector: m[2] });
+      add(m[1].replace(/^https?:\/\//, ''), m[2], m[2]);
     }
   }
-  rows.sort((a, b) => a.host.localeCompare(b.host));
+  let hints = [];
+  try { hints = loadStore().credentialHosts || []; } catch { /* 无档案时无线索 */ }
+  for (const h of hints) {
+    if (h && h.host && h.username) add(String(h.host), String(h.username), null);
+  }
+  const rows = [...entries.values()].sort(
+    (a, b) => a.host.localeCompare(b.host) || String(a.probeUser).localeCompare(String(b.probeUser)),
+  );
   for (const row of rows) {
-    const p = credentialProbe(row.host, { username: row.selector, cwd });
+    const p = credentialProbe(row.host, { username: row.probeUser, cwd });
     row.stored = p.stored;
     row.storedUsername = p.username;
   }

@@ -352,12 +352,20 @@ test('credential：set 管道写入 / list 探测 / remove 删除（store helper
 
   const empty = sb.run(['credential', 'list']);
   assert.equal(empty.code, 0, empty.err);
-  assert.match(empty.out, /尚无凭据账号选择器/);
+  assert.match(empty.out, /尚无凭据线索/);
 
   // set：stdin 管道喂假 token（子进程非 TTY 自动走 stdin 分支）
   const set = sb.run(['credential', 'set', 'example.com', 'corp-zhang'], sb.home, 'sandbox-token-not-real');
   assert.equal(set.code, 0, set.err);
   assert.match(set.out, /已保存 example\.com/);
+
+  // login/set 记录的非密钥线索让 list"看得到"凭据（协议无枚举，凭线索点名）
+  const hinted = sb.run(['credential', 'list']);
+  assert.equal(hinted.code, 0, hinted.err);
+  assert.match(hinted.out, /example\.com/);
+  assert.match(hinted.out, /corp-zhang/);
+  assert.match(hinted.out, /✓/);
+  assert.match(hinted.out, /登录线索/);
 
   // gitid 档案零 token 痕迹（credential 管道不触碰档案——此刻档案甚至尚不存在）
   const cfgPath = path.join(sb.home, '.config/gitid/config.json');

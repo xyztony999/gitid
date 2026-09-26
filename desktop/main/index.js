@@ -286,6 +286,8 @@ handle('credential:list', () => core.credentialList());
 
 handle('credential:set', (e, host, username, token) => core.credentialStore(host, username, token));
 
+handle('credential:login', (e, host, username) => core.credentialLogin(host, username || undefined));
+
 handle('credential:remove', (e, host, username) => core.credentialErase(host, username || undefined));
 
 handle('settings:save', (e, patch) => {

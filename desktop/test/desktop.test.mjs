@@ -166,8 +166,11 @@ test('core：凭据管道与选择器（沙箱 store helper，假 token）', () 
     core.saveStore(store);
     core.applyIdentity(core.getIdentity(core.loadStore(), 'work'), 'global', { store: core.loadStore() });
     const selector = core.cfgGet('global', 'credential.https://example.com.username');
+    const hints = core.loadStore().credentialHosts || [];
+    const listed = core.credentialList();
     console.log(JSON.stringify({
       probed, miss: miss.stored, gone: gone.stored, selector,
+      hints, listed: listed.map((x) => ({ host: x.host, selector: x.selector || null, stored: x.stored })),
       leaked: JSON.stringify(core.loadStore()).includes('sandbox-token-not-real'),
     }));
   `;
@@ -178,6 +181,8 @@ test('core：凭据管道与选择器（沙箱 store helper，假 token）', () 
   assert.equal(out.miss, false);
   assert.equal(out.gone, false);
   assert.equal(out.selector, 'corp-zhang');
+  assert.equal(out.hints.length, 0); // erase 已清除登录线索（非密钥）
+  assert.deepEqual(out.listed, [{ host: 'example.com', selector: 'corp-zhang', stored: false }]); // 仅剩选择器行，实存已删
   assert.equal(out.leaked, false); // token 绝不进身份档案
 });
 

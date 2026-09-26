@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('gitid', {
   clearMirror: (repo, remote) => ipcRenderer.invoke('repo:clearMirror', repo, remote),
   credentialList: () => ipcRenderer.invoke('credential:list'),
   credentialSet: (host, username, token) => ipcRenderer.invoke('credential:set', host, username, token),
+  credentialLogin: (host, username) => ipcRenderer.invoke('credential:login', host, username),
   credentialRemove: (host, username) => ipcRenderer.invoke('credential:remove', host, username),
   saveSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
   pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),

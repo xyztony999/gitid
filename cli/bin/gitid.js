@@ -449,13 +449,13 @@ async function cmdCredential({ positional, flags }) {
   if (!action || action === 'list') {
     let rows = core.credentialList();
     if (host) rows = rows.filter((r) => r.host === core.parseCredBasis(host).host);
-    if (!rows.length) { info('尚无凭据账号选择器（gitid add --account <host>=<用户名>，或 credential set/login 先存凭据）'); return; }
+    if (!rows.length) { info('尚无凭据线索：gitid credential login <host> 登录（GCM 弹窗），或 gitid add --account <host>=<用户名> 配置选择器'); return; }
     const table = [['host', '选择器 username', 'helper 实存', '']];
     for (const r of rows) {
-      table.push([r.host, r.selector, r.stored ? green(r.storedUsername) : dim('未存储'), r.stored ? green('✓') : dim('—')]);
+      table.push([r.host, r.selector || dim('—（登录线索）'), r.stored ? green(r.storedUsername) : dim('未存储'), r.stored ? green('✓') : dim('—')]);
     }
     printTable(table, { indent: '' });
-    info(dim('helper 实存经 git credential 协议只读探测；token 永不展示（ADR-017）'));
+    info(dim('helper 实存经 git credential 协议只读探测（协议无枚举，按线索点名）；token 永不展示（ADR-017）'));
     return;
   }
 

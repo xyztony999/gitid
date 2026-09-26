@@ -20,6 +20,7 @@ export const api = {
   clearMirror: (repo, remote) => call(window.gitid.clearMirror, repo, remote),
   credentialList: () => call(window.gitid.credentialList),
   credentialSet: (host, username, token) => call(window.gitid.credentialSet, host, username, token),
+  credentialLogin: (host, username) => call(window.gitid.credentialLogin, host, username),
   credentialRemove: (host, username) => call(window.gitid.credentialRemove, host, username),
   saveSettings: (patch) => call(window.gitid.saveSettings, patch),
   pickDirectory: () => call(window.gitid.pickDirectory),

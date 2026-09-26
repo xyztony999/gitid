@@ -97,7 +97,7 @@ npm run package:win # Windows x64 + arm64 NSIS 安装包 → desktop/dist/
 |------|------|
 | 身份管理 | 新增/编辑/删除身份（含 insteadOf URL 重写与凭据账号选择器，多行成对编辑），一键切换全局身份（含签名键/重写/选择器自动清理，与 `gitid use` 同语义） |
 | 仓库审计 | 扫描任意目录下的 git 仓库，可视化各仓库生效身份/缺失/手配状态与远程镜像（⊕）/凭据账号（@user）；每个仓库通过下拉独立选择「继承全局」或单独设置本地身份，选即生效；可一键开启/取消镜像推送（对应 `remote mirror/unmirror`）；可把目录与深度「设为默认」（与 CLI `scan --save` 共用） |
-| 凭据 | 凭据账号总览（选择器 → helper 实存探测）、粘贴 PAT 保存/覆盖、删除；token 仅内存中转直达 helper，不落档案不回显（对应 `credential list/set/remove`；交互登录推荐 CLI `credential login`） |
+| 凭据 | 登录（触发 GCM 自身弹窗，token 不经 gitid）、凭据账号总览（选择器+登录线索 → helper 实存探测）、粘贴 PAT 保存/覆盖、删除；token 仅内存中转直达 helper，不落档案不回显（对应 `credential login/list/set/remove`） |
 | 托盘快速切换 | 系统托盘列出全部身份，单击即切换全局身份；关闭主窗口后托盘常驻 |
 
 架构：主进程 `desktop/main/`（窗口/托盘/IPC/档案监听）+ 渲染层 `desktop/renderer/`（Vue3 + AntD 4），业务核心直接复用 `cli/lib/core.js`（打包时经 `scripts/sync-core.mjs` 同步，一致性有测试保障）。

@@ -15,7 +15,7 @@
 
 | 分区 | 职责 |
 |------|------|
-| `main/index.js` | Electron 主进程：窗口/系统托盘/15 个 IPC 通道（含凭据管道 credential:*，token 不进广播载荷）/档案监听广播（watchFile 档案 + `~/.gitconfig` + `$XDG_CONFIG_HOME/git/config`） |
+| `main/index.js` | Electron 主进程：窗口/系统托盘/16 个 IPC 通道（含凭据管道 credential:*，token 不进广播载荷）/档案监听广播（watchFile 档案 + `~/.gitconfig` + `$XDG_CONFIG_HOME/git/config`） |
 | `main/core.js` | `cli/lib/core.js` 的构建期同步副本（gitignore，由 `scripts/sync-core.mjs` 生成，测试逐字节比对） |
 | `main/preload.js` | contextBridge 唯一桥：全部 `ipcRenderer.invoke`，返回 `{ok, data|error}`（ADR-012） |
 | `renderer/src/` | Vue3 + AntD 4：App（布局/全局身份标签/刷新）+ 身份管理视图 + 仓库审计视图（vite 构建至 renderer-dist/） |
