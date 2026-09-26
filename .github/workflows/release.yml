@@ -1,7 +1,7 @@
 # 发版流水线：推 v* tag 触发（git push github v0.x.y && git push origin v0.x.y）
 # 测试 → 构建 linux x64/arm64 × AppImage/deb/rpm + win x64/arm64 NSIS
-# → 创建 GitHub Release 附产物 → 镜像 gitee Release
-# workflow_dispatch 手动触发只跑测试与构建（release/mirror 仅 tag 触发）
+# → 创建 GitHub Release 附产物（gitee 侧只接收代码与 tag 推送，不做 Release 镜像）
+# workflow_dispatch 手动触发只跑测试与构建（release 仅 tag 触发）
 name: release
 
 on:
@@ -93,37 +93,3 @@ jobs:
           # 本任务无 checkout（无 git 上下文），gh 需显式 --repo
           gh release create "$TAG" --repo "$REPO" assets/* --title "gitid $TAG" --generate-notes \
             || gh release upload "$TAG" --repo "$REPO" assets/* --clobber
-
-  # gitee Release 镜像：需在 GitHub 仓库 Secrets 配置 GITEE_TOKEN（gitee 私人令牌，勾选 projects）；
-  # 未配置则自动跳过。tag 需已推送到 gitee（发版命令同时推两端）。
-  mirror-gitee:
-    needs: release
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-      - name: 镜像 Release 到 gitee
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        run: |
-          if [ -z "$GITEE_TOKEN" ]; then echo '未配置 GITEE_TOKEN，跳过 gitee Release 镜像'; exit 0; fi
-          set -e
-          TAG="${GITHUB_REF_NAME}"
-          REPO='xyztony999/gitid'
-          REL=$(curl -sf -X POST "https://gitee.com/api/v5/repos/$REPO/releases" \
-            -H 'Content-Type: application/json' \
-            -d "{\"access_token\":\"$GITEE_TOKEN\",\"tag_name\":\"$TAG\",\"name\":\"gitid $TAG\",\"body\":\"与 GitHub Release 同源发布，附件一致。\"}" || true)
-          RID=$(printf '%s' "$REL" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
-          if [ -z "$RID" ]; then
-            RID=$(curl -sf "https://gitee.com/api/v5/repos/$REPO/releases/tags/$TAG?access_token=$GITEE_TOKEN" \
-              | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))')
-          fi
-          echo "gitee release id: $RID"
-          # 逐个上传附件（gitee 单附件有大小上限，超限文件会失败但不阻塞其他附件）
-          find dist -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.exe' \) | while read -r f; do
-            echo "attach: $(basename "$f")"
-            curl -s -X POST "https://gitee.com/api/v5/repos/$REPO/releases/$RID/attach_files" \
-              -F "access_token=$GITEE_TOKEN" -F "file=@$f" | head -c 200; echo
-          done

@@ -111,7 +111,7 @@ git tag v0.1.0 && git push github v0.1.0 && git push origin v0.1.0
 ```
 
 - **GitHub Actions**（`.github/workflows/release.yml`）：沙箱测试（CLI e2e + 桌面端含 xvfb 全链路）→ 构建 **linux x64/arm64 × AppImage/deb/rpm**（6 个产物）与 **win x64/arm64 双架构合一 NSIS** → 自动创建 GitHub Release 并附产物。
-- **gitee 镜像**：在 GitHub 仓库 Secrets 配置 `GITEE_TOKEN`（gitee 私人令牌）后，同一流水线会自动在 gitee 创建同名 Release 并上传同源附件；未配置则跳过。gitee 侧另有 Gitee Go 原生流水线（`.workflow/release.yml`，需在仓库设置开通）做同源构建验证。
+- **gitee 侧**：仅接收代码与 tag 推送（不做 Release 镜像，正式产物以 GitHub Release 为准）；Gitee Go 原生流水线（`.workflow/release.yml`，需在仓库设置开通）做同源构建验证。
 - **日常 CI**（`.github/workflows/ci.yml`）：push/PR 在 ubuntu/windows 双平台跑沙箱测试。
 
 ## 仓库结构
