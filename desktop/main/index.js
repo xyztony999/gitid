@@ -105,6 +105,9 @@ if (!gotLock) {
     createWindow();
     createTray();
     watchForChanges();
+    if (!IS_TEST) {
+      setTimeout(() => { checkUpdateSafe().catch(() => {}); }, 1500);
+    }
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
@@ -275,7 +278,54 @@ handle('identity:importGlobal', () => {
   return { id, exists };
 });
 
+handle('identity:importScan', (e, root, depth, dryRun) => {
+  const store = core.loadStore();
+  const settings = core.getSettings(store);
+  const result = core.importScanUnknown(store, root, depth || settings.scanDepth, { dryRun: !!dryRun });
+  if (!dryRun) {
+    core.saveStore(store);
+    broadcast();
+  }
+  return result;
+});
+
+handle('identity:applyLocalBatch', (e, id, repos) => {
+  if (!id) throw new GitidError('请选择身份档案');
+  if (!Array.isArray(repos) || !repos.length) throw new GitidError('请至少选择一个仓库');
+  const store = core.loadStore();
+  const it = core.getIdentity(store, id);
+  const results = core.applyIdentityLocalBatch(store, it, repos);
+  broadcast();
+  return { results };
+});
+
 handle('repo:scan', (e, root, depth) => core.scanRepos(core.loadStore(), root, depth || 6));
+
+handle('repo:audit', (e, repo, expectId) => core.auditRepo(core.loadStore(), repo, { expectId: expectId || undefined }));
+
+handle('repo:exportScan', (e, root, depth, format, report) => {
+  let data;
+  if (report && typeof report === 'object') {
+    data = Array.isArray(report)
+      ? { rows: report, summary: null }
+      : { rows: report.rows || [], summary: report.summary };
+  } else {
+    const store = core.loadStore();
+    data = core.scanRepos(store, root, depth || core.getSettings(store).scanDepth);
+  }
+  return { text: core.formatScanReport(data, format), format };
+});
+
+handle('env:doctor', () => {
+  const report = core.runDoctor(core.loadStore());
+  const checks = (report.checks || []).map((c) => ({
+    id: c.id,
+    level: c.level,
+    message: c.message == null ? '' : String(c.message),
+    detail: c.detail == null ? null : String(c.detail),
+  }));
+  return { checks, gitVersion: report.gitVersion || null, helper: report.helper || null };
+});
 
 handle('repo:setMirror', (e, repoPath, remote, url) => {
   if (!core.repoRoot(repoPath)) throw new GitidError(`不是 git 仓库：${repoPath}`);
@@ -308,6 +358,92 @@ handle('settings:save', (e, patch) => {
 handle('dialog:pickDirectory', async () => {
   const r = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
   return r.canceled ? null : r.filePaths[0];
+});
+
+handle('dialog:saveFile', async (e, opts = {}) => {
+  const r = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: opts.defaultPath || 'gitid-scan.txt',
+    filters: opts.filters || [{ name: 'All Files', extensions: ['*'] }],
+  });
+  if (r.canceled || !r.filePath) return null;
+  fs.writeFileSync(r.filePath, opts.content == null ? '' : String(opts.content), 'utf8');
+  return r.filePath;
+});
+
+// ---------- 自动更新（主进程，不进 core；开发/解压/无网络不当成产品故障） ----------
+
+let lastUpdate = { updateAvailable: false };
+let updaterReady = false;
+
+function updatesUsable() {
+  if (IS_TEST) return false;
+  if (!app.isPackaged) return false;
+  return true;
+}
+
+function getAutoUpdater() {
+  try {
+    return require('electron-updater').autoUpdater;
+  } catch {
+    return null;
+  }
+}
+
+function notifyUpdate(payload) {
+  lastUpdate = payload;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('update-available', payload);
+  }
+}
+
+function setupUpdater() {
+  if (updaterReady || !updatesUsable()) return;
+  const autoUpdater = getAutoUpdater();
+  if (!autoUpdater) return;
+  updaterReady = true;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.on('error', () => { /* 无网络/无 yml 等：不当产品故障 */ });
+  autoUpdater.on('update-available', (info) => {
+    notifyUpdate({
+      updateAvailable: true,
+      version: info && info.version,
+      releaseName: (info && (info.releaseName || info.version)) || '',
+    });
+  });
+  autoUpdater.on('update-not-available', () => {
+    notifyUpdate({ updateAvailable: false });
+  });
+}
+
+async function checkUpdateSafe() {
+  if (!updatesUsable()) return { updateAvailable: false };
+  setupUpdater();
+  const autoUpdater = getAutoUpdater();
+  if (!autoUpdater) return { updateAvailable: false };
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const info = result && result.updateInfo;
+    if (!info || !info.version) return lastUpdate.updateAvailable ? lastUpdate : { updateAvailable: false };
+    const current = app.getVersion();
+    const available = info.version !== current;
+    const payload = available
+      ? { updateAvailable: true, version: info.version, releaseName: info.releaseName || info.version }
+      : { updateAvailable: false };
+    lastUpdate = payload;
+    return payload;
+  } catch {
+    return { updateAvailable: false };
+  }
+}
+
+handle('app:checkUpdate', () => checkUpdateSafe());
+
+handle('app:quitAndInstall', () => {
+  if (!updatesUsable()) throw new GitidError('当前环境不支持安装更新');
+  const autoUpdater = getAutoUpdater();
+  if (!autoUpdater) throw new GitidError('更新组件不可用');
+  autoUpdater.quitAndInstall();
 });
 
 function ipcApplyGlobal(_event, id) {

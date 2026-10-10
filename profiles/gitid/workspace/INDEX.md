@@ -13,6 +13,12 @@ pipeline:
     status: complete
     note: "2026-09-02 用户确认三功能全量交付；核心共用 lib/core.js（ADR-009），AppImage arm64 打包通过"
 
+  - id: gitid-increment-audit-loop
+    title: "增量：审计处置闭环 + SSH 签名 + 分发采用 + CLI 改善"
+    path: "05-reports/d0-increment-2026-10-10.md"
+    status: in_progress
+    note: "2026-10-10 Gate 1 已接受；CLI B1–B7 与 desktop F1–F4 已落地。desktop test 6 绿（xvfb 集成跳过）+ build:renderer 绿；正式 Gate 2 见 05-reports/gate2-increment-2026-10-10.md"
+
 reference:
   - title: "设计决策（ADR）"
     path: "../knowledge/design-decisions/index.md"
@@ -20,30 +26,36 @@ reference:
     path: "../knowledge/business-concepts/index.md"
   - title: "架构与选型"
     path: "../knowledge/architecture-choices/index.md"
+  - title: "形式化业务架构"
+    path: "00-architecture/business-arch.md"
+  - title: "形式化应用架构"
+    path: "00-architecture/application-arch.md"
+  - title: "功能清单"
+    path: "00-architecture/function-list.md"
 
 modules:
   - name: cli
     domain: tool
     stages:
-      requirement: { status: complete, note: "多身份管理：全局+项目级 user.name/email/签名配置；2026-09-02 用户澄清：审计视图按仓库设置不同本地身份、清除即回退继承全局（ADR-002/004，设为本地/清除覆盖，xvfb 实操验证，零代码增量）" }
-      api: { status: complete, note: "命令集：add/list/use/local/current/unset/remove/import/scan（gitid help 全文）；2026-09-18 增量：scan --save 把目录与深度存为默认扫描目录，裸 scan 优先用它" }
-      interaction: { status: complete, note: "中文 CLI 输出、CJK 对齐表格、★/◆ 标记、--no-color" }
-      backend: { status: complete, note: "v0.1.0 核心抽出 lib/core.js（与桌面端共用），bin 仅交互层；2026-09-18 增量：settings（默认扫描目录/深度）入 config.json，getSettings/saveSettings 归一化读写" }
+      requirement: { status: complete, note: "2026-10-10 增量 D0/D2：收编手配、批量本地应用、audit、doctor、gpg.format、scan 导出、completion；不变量 P-01~P-06 保持" }
+      api: { status: complete, note: "2026-10-10 D3：02-detailed/api/cli-increment.md（命令契约，非 HTTP）" }
+      interaction: { status: complete, note: "CLI 人读仍中文；补全脚本为平台能力" }
+      backend: { status: complete, note: "2026-10-10 B1–B7 + settings.locale（zh|en）；cli e2e 绿，desktop sync-core 一致性通过" }
       frontend: { status: todo, note: "无前端（由 desktop 模块承担）" }
-      validation: { status: complete, note: "e2e 15/15 通过（沙箱 HOME 隔离，不触碰真实 gitconfig）" }
+      validation: { status: complete, note: "2026-10-10 与 desktop 同一次 Gate 2：栈自检 + P-01~06 通过" }
     gates:
-      gate1: { status: pass, note: "对象模型/ADR/架构三节知识库即 D0-D4 等价产物（轻量路径）" }
-      gate2: { status: pass, note: "npm test 全绿" }
+      gate1: { status: accepted, note: "2026-10-10 用户接受 WARN 三条，按设计默认落地" }
+      gate2: { status: complete, note: "2026-10-10 见 05-reports/gate2-increment-2026-10-10.md" }
 
   - name: desktop
     domain: tool
     stages:
-      requirement: { status: complete, note: "用户确认：Electron+Vue3+AntD；身份管理/仓库审计+项目级切换/托盘快切（2026-09-02）" }
-      api: { status: complete, note: "IPC 10 通道（store:get / identity:save·remove·applyGlobal·applyLocal·unsetLocal·importGlobal / repo:scan / settings:save / dialog:pickDirectory），{ok,data|error} 统一返回；store 载荷带 settings" }
-      interaction: { status: complete, note: "两视图 + 头部全局标签 + 托盘单选；2026-09-03 增量：仓库审计行内「仓库身份」下拉——继承全局（含当前值提示）/单独设置身份/手配占位，选即生效；2026-09-18 增量：扫描工具栏「设为默认/清除默认」——持久化默认扫描目录与深度（与 CLI scan --save 共用 settings），输入框初始回填" }
-      backend: { status: complete, note: "主进程 main/index.js：窗口/托盘/档案监听广播；GITID_DRIVE 集成验证通道；dev 专属端口 5273+标记校验；2026-09-03 修任务栏图标——assets 入包（tray.png 此前未打包）+ app.setName/--class 统一 WM_CLASS=gitid（匹配 StartupWMClass）" }
-      frontend: { status: complete, note: "Vue3 + ant-design-vue 4（vite 构建）；截图验证两视图 + 打包产物一致（xvfb）" }
-      validation: { status: complete, note: "desktop 测试 4 用例（core 一致性+沙箱应用+settings 读写+Electron 全链路驱动，后者无 xvfb 环境跳过）；AppImage+deb（make-deb.mjs 离线装配，ADR-013）打包验证通过；同日修复空输入扫描「目录不存在：~」——~ 展开收敛 core.js，实机回归通过" }
+      requirement: { status: complete, note: "2026-10-10 增量：仓库审计闭环、gpg.format 表单、doctor、i18n、electron-updater" }
+      api: { status: complete, note: "2026-10-10 D3：02-detailed/api/desktop-ipc.md" }
+      interaction: { status: complete, note: "2026-10-10 D4 PageSpec：identity / repos / app-shell" }
+      backend: { status: complete, note: "2026-10-10 IPC：importScan / applyLocalBatch / repo:audit / repo:exportScan / env:doctor / app:checkUpdate / app:quitAndInstall；identity:save 传 gpgFormat；settings:save 传 locale。更新通道不进 core；core 仅 sync-core" }
+      frontend: { status: complete, note: "2026-10-10 F1–F4：IdentityView gpgFormat；RepoView 多选/收编/批量/导出/历史抽屉；App 壳语言/体检/更新横幅；凭据 Tab 只 i18n 不改布局。npm test 6 绿 + build:renderer 绿" }
+      validation: { status: complete, note: "Gate 2 见 05-reports/gate2-increment-2026-10-10.md；本机无 xvfb，Electron 点击路径未实机点验" }
     gates:
-      gate1: { status: pass, note: "ADR-009~012 落盘" }
-      gate2: { status: pass, note: "构建/打包/xvfb 截图验证通过；托盘实机体验待用户确认（无头环境不可自动化）" }
+      gate1: { status: accepted, note: "2026-10-10 与 cli 同一次增量门控，用户已确认 WARN" }
+      gate2: { status: complete, note: "2026-10-10 栈 CRITICAL 通过；WARN：本机未跑打包矩阵、未点验 Electron UI" }

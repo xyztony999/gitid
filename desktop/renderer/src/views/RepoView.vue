@@ -4,35 +4,53 @@
       <a-space>
         <a-input
           v-model:value="root"
-          :placeholder="`扫描根目录（默认 ${defaultRoot()}）`"
+          :placeholder="t('repo.rootPh', { root: defaultRoot() })"
           style="width: 380px"
           @pressEnter="scan"
         >
           <template #prefix><FolderOutlined class="dim" /></template>
         </a-input>
-        <a-button @click="pickDirectory">选择目录</a-button>
-        <span class="dim">深度</span>
+        <a-button @click="pickDirectory">{{ t('repo.pickDir') }}</a-button>
+        <span class="dim">{{ t('repo.depth') }}</span>
         <a-input-number v-model:value="depth" :min="1" :max="12" style="width: 72px" />
         <a-button type="primary" :loading="scanning" @click="scan">
           <template #icon><ScanOutlined /></template>
-          扫描
+          {{ t('repo.scan') }}
         </a-button>
-        <a-tooltip title="保存当前目录与深度；此后桌面端与 CLI 的 scan 不带参数即用它">
+        <a-tooltip :title="t('repo.saveDefaultTip')">
           <a-button @click="saveDefault">
             <template #icon><SaveOutlined /></template>
-            设为默认
+            {{ t('repo.saveDefault') }}
           </a-button>
         </a-tooltip>
-        <a-button v-if="hasDefault" type="link" @click="clearDefault">清除默认</a-button>
+        <a-button v-if="hasDefault" type="link" @click="clearDefault">{{ t('repo.clearDefault') }}</a-button>
       </a-space>
       <span v-if="summaryText" class="dim">{{ summaryText }}</span>
+    </div>
+
+    <div v-if="rows.length" class="toolbar actions-bar">
+      <a-space>
+        <a-button v-if="unknownCount" @click="confirmImport">{{ t('repo.importUnknown') }}</a-button>
+        <a-button :disabled="!selectedKeys.length" @click="openBatch">{{ t('repo.batch') }}</a-button>
+        <a-button @click="selectMissing">{{ t('repo.selectMissing') }}</a-button>
+        <a-dropdown>
+          <a-button>{{ t('repo.export') }}</a-button>
+          <template #overlay>
+            <a-menu @click="onExport">
+              <a-menu-item key="json">JSON</a-menu-item>
+              <a-menu-item key="markdown">Markdown</a-menu-item>
+              <a-menu-item key="csv">CSV</a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
+      </a-space>
     </div>
 
     <a-alert
       v-if="scanned && rows.length === 0"
       type="info"
       show-icon
-      :message="`在 ${root || defaultRoot()} 下未发现 git 仓库（深度 ${depth}）`"
+      :message="t('repo.emptyScan', { root: root || defaultRoot(), depth })"
       class="mb"
     />
 
@@ -44,10 +62,11 @@
       row-key="path"
       size="middle"
       :loading="scanning"
+      :row-selection="rowSelection"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'status'">
-          <a-tag :color="statusMeta[record.status].color">{{ statusMeta[record.status].text }}</a-tag>
+          <a-tag :color="statusMeta[record.status].color">{{ t(`repo.status.${record.status}`) }}</a-tag>
         </template>
         <template v-else-if="column.key === 'repo'">
           <a-tooltip :title="record.path">
@@ -57,30 +76,30 @@
         <template v-else-if="column.key === 'remotes'">
           <a-space :size="4" wrap>
             <template v-for="r in record.remotes || []" :key="r.name">
-              <a-tooltip v-if="!r.mirror" :title="`${r.url}${r.account ? `\n凭据账号：${r.account}` : ''}`">
+              <a-tooltip v-if="!r.mirror" :title="`${r.url}${r.account ? `\n${t('repo.accountHint', { user: r.account })}` : ''}`">
                 <a-tag class="mono remote-tag">
                   {{ r.name }}<span v-if="r.account" class="dim">@{{ r.account }}</span>
                 </a-tag>
               </a-tooltip>
-              <a-tooltip v-else :title="`push 同时推：\n${r.pushurls.join('\n')}${r.account ? `\n凭据账号：${r.account}` : ''}`">
+              <a-tooltip v-else :title="`${t('repo.pushBoth')}\n${r.pushurls.join('\n')}${r.account ? `\n${t('repo.accountHint', { user: r.account })}` : ''}`">
                 <a-tag class="mono remote-tag" color="blue">{{ r.name }} ⊕</a-tag>
               </a-tooltip>
             </template>
             <a-button type="link" size="small" @click="openMirror(record)">
-              {{ (record.remotes || []).some((r) => r.mirror) ? '管理' : '镜像' }}
+              {{ (record.remotes || []).some((r) => r.mirror) ? t('repo.manage') : t('repo.mirror') }}
             </a-button>
           </a-space>
         </template>
         <template v-else-if="column.key === 'identity'">
           <a-select
             :value="selectValue(record)"
-            placeholder="本地手配（未匹配档案）"
+            :placeholder="t('repo.manualLocal')"
             style="width: 100%"
             :class="{ 'manual-local': record.hasLocal && !localIdentityId(record) }"
             @change="(val) => changeRepoIdentity(record, val)"
           >
             <a-select-option :value="INHERIT">
-              <span class="dim">继承全局</span>{{ inheritHint }}
+              <span class="dim">{{ t('repo.inherit') }}</span>{{ inheritHint }}
             </a-select-option>
             <a-select-option v-for="opt in identityOptions" :key="opt.id" :value="opt.id">
               {{ opt.id }} — {{ opt.name }} &lt;{{ opt.email }}&gt;
@@ -88,20 +107,23 @@
           </a-select>
         </template>
         <template v-else-if="column.key === 'effective'">
-          <span v-if="record.status === 'missing'" class="mono">user.name/email 缺失</span>
+          <span v-if="record.status === 'missing'" class="mono">{{ t('repo.missingKeys') }}</span>
           <span v-else>{{ record.effective.name }} <span class="dim">&lt;{{ record.effective.email }}&gt;</span></span>
+        </template>
+        <template v-else-if="column.key === 'actions'">
+          <a-button type="link" size="small" @click="openAudit(record)">{{ t('repo.history') }}</a-button>
         </template>
       </template>
     </a-table>
     <div v-else-if="!scanned" class="hint dim">
-      扫描目录查看各仓库生效身份；每个仓库可独立选择「继承全局」或单独设置本地身份，并管理远程镜像推送。
+      {{ t('repo.hint') }}
     </div>
 
     <a-modal
       v-model:open="mirrorModal.open"
-      :title="mirrorModal.repo ? `镜像推送：${mirrorModal.repo.rel}` : '镜像推送'"
-      ok-text="启用镜像"
-      cancel-text="关闭"
+      :title="mirrorModal.repo ? t('repo.mirrorTitle', { rel: mirrorModal.repo.rel }) : t('repo.mirrorPlain')"
+      :ok-text="t('repo.mirrorEnable')"
+      :cancel-text="t('common.close')"
       :confirm-loading="mirrorModal.loading"
       @ok="enableMirror"
     >
@@ -110,39 +132,106 @@
           v-if="mirrorModal.repo && !(mirrorModal.repo.remotes || []).length"
           type="warning"
           show-icon
-          message="该仓库尚无远程，先在仓库内 git remote add <name> <url>"
+          :message="t('repo.noRemote')"
           class="mb"
         />
-        <a-form-item label="远程">
+        <a-form-item :label="t('repo.remote')">
           <a-select v-model:value="mirrorModal.remote" style="width: 100%">
             <a-select-option
               v-for="r in (mirrorModal.repo && mirrorModal.repo.remotes) || []"
               :key="r.name"
               :value="r.name"
             >
-              {{ r.name }}{{ r.mirror ? '（已镜像 ⊕）' : '' }}{{ r.url ? ` — ${r.url}` : '' }}
+              {{ r.name }}{{ r.mirror ? t('repo.mirrored') : '' }}{{ r.url ? ` — ${r.url}` : '' }}
             </a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item label="镜像地址（git push 时与原地址同时推送）" required>
-          <a-input v-model:value="mirrorModal.url" placeholder="https://gitee.com/<user>/<repo>.git" />
+        <a-form-item :label="t('repo.mirrorUrl')" required>
+          <a-input v-model:value="mirrorModal.url" :placeholder="t('repo.mirrorUrlPh')" />
         </a-form-item>
         <a-form-item v-if="mirrorTarget && mirrorTarget.mirror">
-          <a-button danger size="small" @click="disableMirror">取消该远程的镜像推送</a-button>
+          <a-button danger size="small" @click="disableMirror">{{ t('repo.clearMirror') }}</a-button>
         </a-form-item>
-        <div class="dim mirror-note">
-          凭据仍由 git 自身（GCM/SSH）管理；fetch 不受影响，仅 push 同时推两端。
-        </div>
+        <div class="dim mirror-note">{{ t('repo.mirrorNote') }}</div>
       </a-form>
     </a-modal>
+
+    <a-modal
+      v-model:open="batch.open"
+      :title="t('repo.batchTitle')"
+      :ok-text="t('common.ok')"
+      :cancel-text="t('common.cancel')"
+      :confirm-loading="batch.loading"
+      @ok="doBatch"
+    >
+      <a-form layout="vertical">
+        <a-form-item :label="t('repo.batchIdentity')" required>
+          <a-select v-model:value="batch.id" :placeholder="t('repo.batchIdentityPh')" style="width: 100%">
+            <a-select-option v-for="opt in identityOptions" :key="opt.id" :value="opt.id">
+              {{ opt.id }} — {{ opt.name }} &lt;{{ opt.email }}&gt;
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item>
+          <a-checkbox v-model:checked="batch.missingOnly">{{ t('repo.missingOnly') }}</a-checkbox>
+        </a-form-item>
+        <div class="dim mb">{{ t('repo.batchPreview', { n: batchTargets.length }) }}</div>
+        <ul class="batch-list">
+          <li v-for="r in batchTargets" :key="r.path" class="mono">{{ r.rel }}</li>
+        </ul>
+      </a-form>
+    </a-modal>
+
+    <a-drawer
+      v-model:open="audit.open"
+      :title="audit.repo ? t('repo.auditTitle', { rel: audit.repo.rel }) : t('repo.history')"
+      width="640"
+    >
+      <a-form-item :label="t('repo.expectId')">
+        <a-select
+          v-model:value="audit.expectId"
+          allow-clear
+          :placeholder="t('repo.expectPh')"
+          style="width: 100%"
+          @change="reloadAudit"
+        >
+          <a-select-option v-for="opt in identityOptions" :key="opt.id" :value="opt.id">
+            {{ opt.id }} — {{ opt.name }} &lt;{{ opt.email }}&gt;
+          </a-select-option>
+        </a-select>
+      </a-form-item>
+      <a-table
+        :columns="auditColumns"
+        :data-source="audit.authors"
+        :pagination="false"
+        row-key="rowKey"
+        size="small"
+        :loading="audit.loading"
+        class="mb"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'match'">{{ record.matchId || t('repo.unmatchedAuthor') }}</template>
+          <template v-else-if="column.key === 'polluted'">
+            <span v-if="record.polluted === true">{{ t('repo.pollutedYes') }}</span>
+            <span v-else-if="record.polluted === false">{{ t('repo.pollutedNo') }}</span>
+            <span v-else class="dim">{{ t('common.dash') }}</span>
+          </template>
+        </template>
+      </a-table>
+      <a-form-item :label="t('repo.mailmap')">
+        <a-textarea :value="audit.mailmap || t('repo.mailmapEmpty')" :rows="8" readonly />
+        <a-button class="copy-btn" :disabled="!audit.mailmap" @click="copyMailmap">{{ t('common.copy') }}</a-button>
+      </a-form-item>
+    </a-drawer>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue';
-import { message } from 'ant-design-vue';
+import { Modal, message } from 'ant-design-vue';
 import { FolderOutlined, SaveOutlined, ScanOutlined } from '@ant-design/icons-vue';
 import { api } from '../api.js';
+import { t } from '../i18n.js';
 
 const props = defineProps({ store: { type: Object, required: true } });
 const emit = defineEmits(['changed']);
@@ -155,12 +244,10 @@ const scanning = ref(false);
 const scanned = ref(false);
 const rows = ref([]);
 const summary = ref(null);
+const selectedKeys = ref([]);
 
-// 已保存的默认扫描目录（settings:save 写入，CLI scan --save 共用同一份）
 const hasDefault = computed(() => !!(props.store.settings && props.store.settings.scanRoot));
 
-// 首次拿到真实档案时用已存默认初始化输入框；此后档案刷新（含 CLI 侧改动广播）
-// 不再回填，避免覆盖用户正在输入的目录
 let settingsInited = false;
 watch(() => props.store, (s) => {
   if (settingsInited || !s.settings) return;
@@ -169,32 +256,33 @@ watch(() => props.store, (s) => {
   depth.value = s.settings.scanDepth || 6;
 }, { immediate: true });
 
-const columns = [
-  { title: '状态', key: 'status', width: 96 },
-  { title: '仓库', key: 'repo', ellipsis: true },
-  { title: '远程/镜像', key: 'remotes', width: 190 },
-  { title: '仓库身份（继承全局 / 单独设置）', key: 'identity', width: 280 },
-  { title: '生效配置', key: 'effective', ellipsis: true },
-];
+const columns = computed(() => [
+  { title: t('repo.colStatus'), key: 'status', width: 96 },
+  { title: t('repo.colRepo'), key: 'repo', ellipsis: true },
+  { title: t('repo.colRemotes'), key: 'remotes', width: 190 },
+  { title: t('repo.colIdentity'), key: 'identity', width: 260 },
+  { title: t('repo.colEffective'), key: 'effective', ellipsis: true },
+  { title: t('repo.colActions'), key: 'actions', width: 72, align: 'right' },
+]);
 
 const statusMeta = {
-  ok: { color: 'green', text: '✓ 正常' },
-  missing: { color: 'red', text: '✗ 缺失' },
-  unknown: { color: 'orange', text: '⚠ 手配' },
+  ok: { color: 'green' },
+  missing: { color: 'red' },
+  unknown: { color: 'orange' },
 };
 
 const identityOptions = computed(() => props.store.identities || []);
+const unknownCount = computed(() => rows.value.filter((r) => r.status === 'unknown').length);
 
 const inheritHint = computed(() => {
   const g = props.store.global || {};
-  if (g.identityId) return `（当前 ${g.identityId}）`;
+  if (g.identityId) return t('repo.inheritCurrent', { id: g.identityId });
   if (g.name !== undefined || g.email !== undefined) {
-    return `（当前 ${g.name || '?'} <${g.email || '?'}>，未匹配档案）`;
+    return t('repo.inheritUnmatched', { name: g.name || '?', email: g.email || '?' });
   }
-  return '（全局未配置）';
+  return t('repo.inheritUnset');
 });
 
-// 本地覆盖若与某档案 name+email 完全一致，视为该身份
 function localIdentityId(record) {
   if (!record.hasLocal) return null;
   const it = (props.store.identities || []).find(
@@ -205,14 +293,26 @@ function localIdentityId(record) {
 
 function selectValue(record) {
   if (!record.hasLocal) return INHERIT;
-  return localIdentityId(record) ?? undefined; // 手配 → undefined，显示占位符
+  return localIdentityId(record) ?? undefined;
 }
 
 const summaryText = computed(() => {
   if (!summary.value) return '';
   const s = summary.value;
-  return `共 ${s.total} 个仓库 · ${s.withLocal} 个单独设置 · ${s.missing} 个配置缺失${s.unknown ? ` · ${s.unknown} 个未匹配档案` : ''}${s.mirrored ? ` · ${s.mirrored} 个镜像推送` : ''}`;
+  return t('repo.summary', { total: s.total, withLocal: s.withLocal, missing: s.missing })
+    + (s.unknown ? t('repo.summaryUnknown', { n: s.unknown }) : '')
+    + (s.mirrored ? t('repo.summaryMirror', { n: s.mirrored }) : '');
 });
+
+const rowSelection = computed(() => ({
+  selectedRowKeys: selectedKeys.value,
+  onChange: (keys) => { selectedKeys.value = keys; },
+}));
+
+function pruneSelection() {
+  const live = new Set(rows.value.map((r) => r.path));
+  selectedKeys.value = selectedKeys.value.filter((k) => live.has(k));
+}
 
 async function scan() {
   scanning.value = true;
@@ -221,6 +321,7 @@ async function scan() {
     rows.value = r.rows;
     summary.value = r.summary;
     scanned.value = true;
+    pruneSelection();
   } catch (e) {
     message.error(e.message);
   } finally {
@@ -229,7 +330,6 @@ async function scan() {
 }
 
 function defaultRoot() {
-  // 与占位符一致；~ / ~/x 由核心 scanRepos 展开为真实主目录路径
   return (props.store.settings && props.store.settings.scanRoot) || '~/Projects';
 }
 
@@ -243,10 +343,10 @@ async function pickDirectory() {
 }
 
 async function saveDefault() {
-  if (!root.value.trim()) { message.warning('请先填写或选择扫描目录，再保存为默认'); return; }
+  if (!root.value.trim()) { message.warning(t('repo.needDefaultRoot')); return; }
   try {
     await api.saveSettings({ scanRoot: root.value.trim(), scanDepth: depth.value });
-    message.success(`已保存默认扫描目录：${root.value.trim()}（深度 ${depth.value}）`);
+    message.success(t('repo.savedDefault', { root: root.value.trim(), depth: depth.value }));
     emit('changed');
   } catch (e) {
     message.error(e.message);
@@ -256,23 +356,22 @@ async function saveDefault() {
 async function clearDefault() {
   try {
     await api.saveSettings({ scanRoot: '' });
-    message.success('已清除默认扫描目录，回退 ~/Projects');
+    message.success(t('repo.clearedDefault'));
     emit('changed');
   } catch (e) {
     message.error(e.message);
   }
 }
 
-// 选择即生效：继承全局 = 清除本地覆盖（unsetLocal）；身份 = 写入本地（applyLocal）
 async function changeRepoIdentity(record, val) {
   try {
     if (val === INHERIT) {
       await api.unsetLocal(record.path);
-      message.success(`${record.rel} 已改为继承全局`);
+      message.success(t('repo.inheritDone', { rel: record.rel }));
       emit('changed');
     } else {
       await api.applyLocal(record.path, val);
-      message.success(`已为 ${record.rel} 单独设置身份：${val}（全局不受影响）`);
+      message.success(t('repo.localDone', { rel: record.rel, id: val }));
     }
     await scan();
   } catch (e) {
@@ -280,7 +379,89 @@ async function changeRepoIdentity(record, val) {
   }
 }
 
-// 镜像推送管理（per-repo：remote.<name>.pushurl 多值，push 同时推两端）
+function selectMissing() {
+  selectedKeys.value = rows.value.filter((r) => r.status === 'missing').map((r) => r.path);
+}
+
+function confirmImport() {
+  Modal.confirm({
+    title: t('repo.importTitle'),
+    content: t('repo.importConfirm', { n: unknownCount.value }),
+    okText: t('common.ok'),
+    cancelText: t('common.cancel'),
+    async onOk() { await doImport(); },
+  });
+}
+
+async function doImport() {
+  try {
+    const r = await api.importScan(root.value || defaultRoot(), depth.value, false);
+    const n = (r.imported || []).length;
+    const skipped = (r.skipped || []).length;
+    if (n === 0 && skipped === 0) message.info(t('repo.importedNone'));
+    else message.success(t('repo.imported', { n, skipped }));
+    emit('changed');
+    await scan();
+  } catch (e) {
+    message.error(e.message);
+  }
+}
+
+const batch = reactive({ open: false, id: undefined, missingOnly: true, loading: false });
+const batchTargets = computed(() => {
+  const selected = rows.value.filter((r) => selectedKeys.value.includes(r.path));
+  return batch.missingOnly ? selected.filter((r) => r.status === 'missing') : selected;
+});
+
+function openBatch() {
+  batch.id = (identityOptions.value[0] && identityOptions.value[0].id) || undefined;
+  batch.missingOnly = true;
+  batch.open = true;
+}
+
+async function doBatch() {
+  if (!batch.id) { message.warning(t('repo.batchNeedId')); return; }
+  const repos = batchTargets.value.map((r) => r.path);
+  if (!repos.length) { message.warning(t('repo.batchNeedRepos')); return; }
+  batch.loading = true;
+  try {
+    const r = await api.applyLocalBatch(batch.id, repos);
+    const results = (r && r.results) || [];
+    const okN = results.filter((x) => x.ok).length;
+    const fail = results.length - okN;
+    message.success(t('repo.batchDone', { id: batch.id, ok: okN, fail }));
+    batch.open = false;
+    emit('changed');
+    await scan();
+  } catch (e) {
+    message.error(e.message);
+  } finally {
+    batch.loading = false;
+  }
+}
+
+async function onExport({ key }) {
+  const format = key;
+  try {
+    const data = await api.exportScan(
+      root.value || defaultRoot(),
+      depth.value,
+      format,
+      { rows: rows.value, summary: summary.value },
+    );
+    const ext = format === 'markdown' ? 'md' : format;
+    const saved = await api.saveFile({
+      defaultPath: `gitid-scan.${ext}`,
+      content: data.text,
+      filters: [{ name: format.toUpperCase(), extensions: [ext] }],
+    });
+    if (saved) message.success(t('repo.exported', { path: saved }));
+    else message.info(t('repo.exportCanceled'));
+  } catch (e) {
+    message.error(e.message);
+  }
+}
+
 const mirrorModal = reactive({ open: false, repo: null, remote: 'origin', url: '', loading: false });
 const mirrorTarget = computed(() => {
   const list = (mirrorModal.repo && mirrorModal.repo.remotes) || [];
@@ -295,11 +476,11 @@ function openMirror(record) {
 }
 
 async function enableMirror() {
-  if (!mirrorModal.url.trim()) { message.warning('请填写镜像地址'); return; }
+  if (!mirrorModal.url.trim()) { message.warning(t('repo.needMirrorUrl')); return; }
   mirrorModal.loading = true;
   try {
     await api.setMirror(mirrorModal.repo.path, mirrorModal.remote, mirrorModal.url.trim());
-    message.success(`已开启 ${mirrorModal.repo.rel} · ${mirrorModal.remote} 镜像推送（git push 同时推两端）`);
+    message.success(t('repo.mirrorOn', { rel: mirrorModal.repo.rel, remote: mirrorModal.remote }));
     mirrorModal.open = false;
     await scan();
   } catch (e) {
@@ -312,7 +493,7 @@ async function enableMirror() {
 async function disableMirror() {
   try {
     await api.clearMirror(mirrorModal.repo.path, mirrorModal.remote);
-    message.success(`已取消 ${mirrorModal.repo.rel} · ${mirrorModal.remote} 镜像推送`);
+    message.success(t('repo.mirrorOff', { rel: mirrorModal.repo.rel, remote: mirrorModal.remote }));
     mirrorModal.open = false;
     await scan();
   } catch (e) {
@@ -320,15 +501,56 @@ async function disableMirror() {
   }
 }
 
-// 集成验证用：GITID_SCAN_ROOT 指定时自动扫描
+const audit = reactive({
+  open: false, repo: null, expectId: undefined, authors: [], mailmap: '', loading: false,
+});
+const auditColumns = computed(() => [
+  { title: t('repo.colCount'), key: 'count', dataIndex: 'count', width: 72 },
+  { title: t('repo.colAuthor'), key: 'name', dataIndex: 'name', width: 120 },
+  { title: t('repo.colAuthorEmail'), key: 'email', dataIndex: 'email' },
+  { title: t('repo.colMatch'), key: 'match', width: 110 },
+  { title: t('repo.colPolluted'), key: 'polluted', width: 72 },
+]);
+
+async function openAudit(record) {
+  audit.repo = record;
+  audit.expectId = localIdentityId(record) || undefined;
+  audit.open = true;
+  await reloadAudit();
+}
+
+async function reloadAudit() {
+  if (!audit.repo) return;
+  audit.loading = true;
+  try {
+    const r = await api.auditRepo(audit.repo.path, audit.expectId || undefined);
+    audit.authors = (r.authors || []).map((a, i) => ({ ...a, rowKey: `${a.name}|${a.email}|${i}` }));
+    audit.mailmap = r.mailmapSuggestion || '';
+  } catch (e) {
+    message.error(e.message);
+  } finally {
+    audit.loading = false;
+  }
+}
+
+async function copyMailmap() {
+  try {
+    await navigator.clipboard.writeText(audit.mailmap);
+    message.success(t('repo.copied'));
+  } catch (e) {
+    message.error(t('repo.copyFailed', { error: e.message }));
+  }
+}
+
 onMounted(() => {
-  const flags = (window.gitid && window.gitid.getFlags) ? window.gitid.getFlags() : {};
+  const flags = api.getFlags();
   if (flags.scanRoot) { root.value = flags.scanRoot; scan(); }
 });
 </script>
 
 <style scoped>
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.actions-bar { justify-content: flex-start; }
 .dim { color: #94a3b8; }
 .mono { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; }
 .hint { padding: 32px 0; text-align: center; }
@@ -336,4 +558,6 @@ onMounted(() => {
 .manual-local :deep(.ant-select-selection-item) { color: #d46b08; }
 .remote-tag { font-size: 12px; margin-right: 0; }
 .mirror-note { font-size: 12px; margin-top: -8px; }
+.batch-list { max-height: 200px; overflow: auto; padding-left: 20px; }
+.copy-btn { margin-top: 8px; }
 </style>

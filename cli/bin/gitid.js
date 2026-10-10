@@ -6,6 +6,7 @@
  * 核心逻辑在 ../lib/core.js（与桌面端共用），本文件只负责交互与展示。
  */
 
+const fs = require('node:fs');
 const readline = require('node:readline/promises');
 const core = require('../lib/core.js');
 
@@ -26,7 +27,10 @@ const {
 
 const VERSION = require('../package.json').version;
 const PROGRAM = 'gitid';
-const FLAG_WITH_VALUE = new Set(['name', 'email', 'signingkey', 'set', 'config', 'depth', 'as', 'insteadOf', 'remote', 'account']);
+const FLAG_WITH_VALUE = new Set([
+  'name', 'email', 'signingkey', 'set', 'config', 'depth', 'as', 'insteadOf', 'remote', 'account',
+  'format', 'repos', 'repos-from', 'output', 'expect', 'scan',
+]);
 
 // ---------- 输出与颜色 ----------
 
@@ -51,7 +55,7 @@ const cyan = (s) => paint(s, '36');
 
 function info(msg) { process.stdout.write(msg + '\n'); }
 function fail(msg) { process.stderr.write(red(`✗ ${msg}`) + '\n'); }
-function die(msg) { throw new GitidError(msg); }
+function die(msg, code = 1) { throw new GitidError(msg, code); }
 
 // ---------- 显示宽度（CJK 双宽对齐） ----------
 
@@ -109,7 +113,7 @@ async function prompt(label, fallback) {
 
 async function cmdAdd({ positional, flags }) {
   const [id] = positional;
-  if (!id) die('用法：gitid add <id> --name <姓名> --email <邮箱> [--signingkey <key>] [--gpgsign] [--set k=v]');
+  if (!id) die('用法：gitid add <id> --name <姓名> --email <邮箱> [--signingkey <key>] [--gpgsign] [--format openpgp|ssh|x509] [--set k=v]');
   if (!ID_PATTERN.test(id)) die(`身份 id 只允许字母数字与 . _ - ，且以字母数字开头：「${id}」不合法`);
 
   const store = loadStore(flags.config && flags.config !== true ? flags.config : undefined);
@@ -152,10 +156,15 @@ async function cmdAdd({ positional, flags }) {
     if (!v) die(`--set ${k} 的值不能为空（如需删除键请手动 git config --unset）`);
     extra[k] = v;
   }
+  let gpgFormat;
+  if (flags.format === true) die('用法：gitid add <id> ... --format openpgp|ssh|x509');
+  if (flags.format) gpgFormat = String(flags.format);
+  else if (exists && exists.gpgFormat) gpgFormat = exists.gpgFormat;
 
-  const store2 = core.upsertIdentity(store, id, { name, email, signingkey, gpgsign, insteadOf, accounts, extra }).store;
+  const store2 = core.upsertIdentity(store, id, { name, email, signingkey, gpgsign, gpgFormat, insteadOf, accounts, extra }).store;
   saveStore(store2, flags.config && flags.config !== true ? flags.config : undefined);
-  info(`${exists ? '已更新' : '已新增'}身份 ${bold(id)} —— ${name} <${email}>${signingkey ? cyan(` [签名 ${signingkey}]`) : ''}${insteadOf.length ? cyan(` [URL重写 ×${insteadOf.length}]`) : ''}${accounts.length ? cyan(` [凭据账号 ×${accounts.length}]`) : ''}`);
+  const saved = store2.identities[id];
+  info(`${exists ? '已更新' : '已新增'}身份 ${bold(id)} —— ${name} <${email}>${signingkey ? cyan(` [签名 ${signingkey}]`) : ''}${saved && saved.gpgFormat ? cyan(` [格式 ${saved.gpgFormat}]`) : ''}${insteadOf.length ? cyan(` [URL重写 ×${insteadOf.length}]`) : ''}${accounts.length ? cyan(` [凭据账号 ×${accounts.length}]`) : ''}`);
   info(dim(`应用：gitid use ${id}（全局） 或 gitid use ${id} --local（仅当前仓库）`));
 }
 
@@ -183,11 +192,55 @@ async function cmdList() {
   info(dim(legend.join('    ')));
 }
 
+function printChanges(changes) {
+  for (const ch of changes) {
+    const mark = /^url\..+\.insteadOf$/i.test(ch.key) ? yellow(' [URL重写]') : '';
+    info(green(`  ${dim(ch.key)}: ${ch.from === undefined ? dim('（未设置）') : ch.from} → ${ch.to === undefined ? dim('（已清除）') : ch.to}${mark}`));
+  }
+  if (!changes.length) info(dim('（配置无变化）'));
+}
+
 async function cmdUse({ positional, flags }) {
   const [id] = positional;
-  if (!id) die('用法：gitid use <id> [--local]');
+  if (!id) die('用法：gitid use <id> [--local] [--repos <路径>…] [--repos-from <文件|->]');
   const store = loadStore();
   const it = getIdentity(store, id);
+
+  const repoFlags = flags.repos === undefined ? [] : [].concat(flags.repos);
+  const fromFile = flags['repos-from'];
+  const batch = repoFlags.length > 0 || fromFile;
+
+  if (batch) {
+    if (repoFlags.some((p) => p === true) && repoFlags.every((p) => p === true) && !fromFile) {
+      die('用法：gitid use <id> --repos <路径>…');
+    }
+    let paths = repoFlags.filter((p) => p && p !== true).map(String);
+    if (fromFile) {
+      let raw;
+      if (fromFile === '-' || fromFile === true) raw = await readAllStdin();
+      else {
+        try { raw = fs.readFileSync(String(fromFile), 'utf8'); } catch (e) {
+          die(`无法读取 ${fromFile}：${e.message}`, 2);
+        }
+      }
+      paths = paths.concat(core.parseScanReposFrom(raw, { includeUnknown: !!flags['include-unknown'] }));
+    }
+    if (!paths.length) {
+      info(dim('没有符合条件的仓库'));
+      return;
+    }
+    const results = core.applyIdentityLocalBatch(store, it, paths);
+    for (const r of results) {
+      if (r.ok) {
+        info(`已将身份 ${bold(id)} —— ${it.name} <${it.email}> 应用于${bold('本地')}（${r.path}）`);
+        printChanges(r.changes);
+      } else {
+        fail(r.error);
+      }
+    }
+    if (results.some((x) => !x.ok)) process.exitCode = 2;
+    return;
+  }
 
   const scope = flags.local ? 'local' : 'global';
   if (scope === 'local' && !repoRoot()) die('当前目录不在 git 仓库内（该操作需要 --local 作用域的仓库上下文）');
@@ -195,10 +248,7 @@ async function cmdUse({ positional, flags }) {
   const changes = applyIdentity(it, scope, { store });
   const where = scope === 'local' ? `${bold('当前仓库')}（${repoRoot()}）` : bold('全局');
   info(`已将身份 ${bold(id)} —— ${it.name} <${it.email}> 应用于${where}`);
-  for (const ch of changes) {
-    info(green(`  ${dim(ch.key)}: ${ch.from === undefined ? dim('（未设置）') : ch.from} → ${ch.to}`));
-  }
-  if (!changes.length) info(dim('（配置无变化）'));
+  printChanges(changes);
 
   if (scope === 'global') {
     const root = repoRoot();
@@ -224,6 +274,7 @@ async function cmdCurrent() {
     name: core.cfgGetEffective('user.name'),
     email: core.cfgGetEffective('user.email'),
     signingkey: core.cfgGetEffective('user.signingkey'),
+    gpgFormat: core.cfgGetEffective('gpg.format'),
   };
   const effId = core.matchIdentity(store, eff.name, eff.email);
   const hasLocal = l && (l.name !== undefined || l.email !== undefined);
@@ -253,6 +304,9 @@ async function cmdCurrent() {
   ];
   if (eff.signingkey !== undefined || (hasLocal && l.signingkey !== undefined)) {
     rows.push([dim('  user.signingkey'), eff.signingkey ?? dim('—'), src('signingkey')]);
+  }
+  if (eff.gpgFormat !== undefined || (hasLocal && l.gpgFormat !== undefined)) {
+    rows.push([dim('  gpg.format'), eff.gpgFormat ?? dim('—'), src('gpgFormat')]);
   }
   for (const r of rows) info(pad(r[0], 18) + pad(r[1], 34) + dim(r[2]));
 
@@ -304,6 +358,8 @@ async function cmdRemove({ positional }) {
 }
 
 async function cmdImport({ flags }) {
+  if (flags.scan) return cmdImportScan({ flags });
+
   const store = loadStore();
   const g = readApplied('global', store);
   if (g.name === undefined && g.email === undefined) {
@@ -327,6 +383,37 @@ async function cmdImport({ flags }) {
   info(dim('此后可用 gitid add 新增其他身份，用 gitid use 一键切换'));
 }
 
+function cmdImportScan({ flags }) {
+  const store = loadStore();
+  const settings = core.getSettings(store);
+  const root = flags.scan !== true ? String(flags.scan) : (settings.scanRoot || '.');
+  const depth = Number(flags.depth && flags.depth !== true ? flags.depth : settings.scanDepth);
+  const asId = flags.as && flags.as !== true ? String(flags.as) : undefined;
+  const dryRun = !!flags['dry-run'];
+  const result = core.importScanUnknown(store, root, depth, { dryRun, asId });
+  if (!dryRun && result.imported.length) saveStore(store);
+
+  if (!result.imported.length && !result.skipped.length) {
+    info(`没有可收编的手配（status=unknown）${dryRun ? dim('（演练）') : ''}`);
+    return;
+  }
+  const table = [['动作', 'ID', '姓名', '邮箱', '来源仓库']];
+  for (const x of result.imported) {
+    table.push([dryRun ? yellow('将新增') : green('新增'), x.id, x.name, x.email, x.path]);
+  }
+  for (const x of result.skipped) {
+    table.push([dim('跳过'), x.id, x.name, x.email, x.path]);
+  }
+  for (const w of result.warnings) {
+    table.push([yellow('冲突警告'), w.id, w.name, w.email, w.path]);
+  }
+  printTable(table, { indent: '' });
+  if (result.warnings.length) {
+    for (const w of result.warnings) info(yellow(`  ${w.message}`));
+  }
+  info(dim(`${dryRun ? '演练：将' : '已'}收编 ${result.imported.length} 条 · 跳过 ${result.skipped.length} 条`));
+}
+
 async function cmdScan({ positional, flags }) {
   const store = loadStore();
   const settings = core.getSettings(store);
@@ -341,8 +428,23 @@ async function cmdScan({ positional, flags }) {
   }
 
   const root = rootArg || settings.scanRoot || '.';
-  if (!rootArg && settings.scanRoot) info(dim(`使用默认扫描目录 ${settings.scanRoot}（指定目录可覆盖，scan --save 可更改）`));
+  if (!rootArg && settings.scanRoot && !flags.json && !flags.format) {
+    info(dim(`使用默认扫描目录 ${settings.scanRoot}（指定目录可覆盖，scan --save 可更改）`));
+  }
   const { rows, summary } = scanRepos(store, root, depth);
+  const format = flags.json ? 'json' : (flags.format && flags.format !== true ? String(flags.format) : null);
+  if (format) {
+    const text = core.formatScanReport({ rows, summary }, format);
+    if (flags.output && flags.output !== true) {
+      try { fs.writeFileSync(String(flags.output), text); } catch (e) {
+        die(`无法写入 ${flags.output}：${e.message}`, 2);
+      }
+      info(`已导出 ${format} → ${flags.output}`);
+    } else {
+      process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+    }
+    return;
+  }
   if (!rows.length) { info(`在 ${root} 下未发现 git 仓库（深度 ${depth}）`); return; }
 
   const statusMark = { ok: green('✓'), missing: red('✗'), unknown: yellow('⚠') };
@@ -493,6 +595,58 @@ async function cmdCredential({ positional, flags }) {
   die(`未知子命令「${action}」。用法：gitid credential [list | login <host> | set <host> <username> | remove <host>]`);
 }
 
+async function cmdAudit({ positional, flags }) {
+  const repo = positional[0] || process.cwd();
+  const expectId = flags.expect && flags.expect !== true ? String(flags.expect) : undefined;
+  const report = core.auditRepo(loadStore(), repo, { expectId });
+  if (flags.json) {
+    info(JSON.stringify(report, null, 2));
+    return;
+  }
+  if (!report.authors.length) {
+    info(`仓库 ${report.repo} 尚无提交`);
+  } else {
+    const table = [['count', 'name', 'email', '匹配档案', '污染?']];
+    for (const a of report.authors) {
+      table.push([
+        String(a.count),
+        a.name,
+        a.email,
+        a.matchId || dim('手配'),
+        expectId ? (a.polluted ? yellow('是') : '否') : '',
+      ]);
+    }
+    printTable(table, { indent: '' });
+  }
+  if (report.mailmapSuggestion) {
+    info('');
+    info(dim('mailmap 建议（只展示，不写入 .mailmap）'));
+    info(report.mailmapSuggestion);
+  }
+}
+
+async function cmdDoctor({ positional, flags }) {
+  if (positional.length) die('用法：gitid doctor [--json]');
+  const report = core.runDoctor(loadStore());
+  if (flags.json) {
+    info(JSON.stringify(report, null, 2));
+  } else {
+    const table = [['级别', '检查项', '说明']];
+    for (const c of report.checks) {
+      const level = c.level === 'fail' ? red('fail') : c.level === 'warn' ? yellow('warn') : green('ok');
+      table.push([level, c.id, c.message]);
+    }
+    printTable(table, { indent: '' });
+  }
+  if (report.checks.some((c) => c.level === 'fail')) process.exitCode = 2;
+}
+
+function cmdCompletion({ positional }) {
+  const [shell] = positional;
+  if (!shell) die('用法：gitid completion <bash|zsh|fish|pwsh>');
+  process.stdout.write(core.completionScript(shell));
+}
+
 // ---------- 帮助 ----------
 
 function cmdHelp() {
@@ -501,21 +655,30 @@ function cmdHelp() {
   info('管理多套 git 身份（user.name / user.email / 签名配置），应用于全局或单个仓库。');
   info('');
   info(bold('用法'));
-  info(`  ${PROGRAM} add <id> --name <姓名> --email <邮箱> [--signingkey <key>] [--gpgsign] [--set k=v]`);
+  info(`  ${PROGRAM} add <id> --name <姓名> --email <邮箱> [--signingkey <key>] [--gpgsign] [--format openpgp|ssh|x509] [--set k=v]`);
   info(`      ${dim('新增/更新身份档案（重复 add 为覆盖更新；姓名邮箱缺省时交互询问）')}`);
+  info(`      ${dim('--format 声明 gpg.format；省略则档案不带该字段，应用时 unset')}`);
   info(`      ${dim('--insteadOf 原始地址=替换地址 可重复：随身份切换 URL 重写（镜像加速/多账号协议），凭据归 GCM/SSH')}`);
   info(`      ${dim('--account host=用户名 可重复：凭据账号选择器（GCM 按 username 取凭据，token 不入档案）')}`);
   info(`  ${PROGRAM} list                ${dim('列出所有身份（★=当前全局 ◆=当前仓库本地覆盖）')}`);
-  info(`  ${PROGRAM} use <id> [--local]  ${dim('应用身份：默认写入全局，--local 仅当前仓库')}`);
-  info(`  ${PROGRAM} local <id>          ${dim('等价于 use <id> --local')}`);
+  info(`  ${PROGRAM} use <id> [--local] [--repos <路径>…] [--repos-from <文件|->] [--include-unknown]`);
+  info(`      ${dim('应用身份：默认写入全局，--local 仅当前仓库；--repos / --repos-from 强制逐仓本地写入')}`);
+  info(`      ${dim('--repos-from 读 scan --json，默认只取 missing；--include-unknown 另含 unknown')}`);
+  info(`  ${PROGRAM} local <id>          ${dim('等价于 use <id> --local（亦可带 --repos / --repos-from）')}`);
   info(`  ${PROGRAM} current             ${dim('查看当前目录生效身份与来源（本地覆盖 → 全局回退）')}`);
   info(`  ${PROGRAM} unset [--local|--global]`);
-  info(`      ${dim('清除身份键（默认 --local，仅当前仓库）')}`);
+  info(`      ${dim('清除身份键（默认 --local，仅当前仓库；含 gpg.format）')}`);
   info(`  ${PROGRAM} remove <id>         ${dim('删除身份档案（不影响已写入的 git 配置）')}`);
-  info(`  ${PROGRAM} import [--as <id>]  ${dim('将现有全局 git 身份导入为档案')}`);
-  info(`  ${PROGRAM} scan [目录] [--depth N] [--save]`);
+  info(`  ${PROGRAM} import [--as <id>] [--scan [目录]] [--depth N] [--dry-run]`);
+  info(`      ${dim('无 --scan：将现有全局 git 身份导入为档案')}`);
+  info(`      ${dim('--scan：只收编 status=unknown 的手配；同名邮已在库则跳过；--dry-run 只打印')}`);
+  info(`  ${PROGRAM} scan [目录] [--depth N] [--save] [--json] [--format json|markdown|csv] [--output <文件>]`);
   info(`      ${dim('扫描目录下所有 git 仓库，审计身份配置与远程镜像状态（默认深度 6，不深入仓库内部）')}`);
-  info(`      ${dim('--save 把目录与深度存为默认：此后不带参数的 scan（及桌面端扫描）直接使用')}`);
+  info(`      ${dim('--save 把目录与深度存为默认；--json / --format 导出，--output 写入文件')}`);
+  info(`  ${PROGRAM} audit [仓库] [--expect <id>] [--json]`);
+  info(`      ${dim('只读聚合作者 name/email；--expect 把邮箱不等于该身份的作者标为污染；mailmap 只建议不写文件')}`);
+  info(`  ${PROGRAM} doctor [--json]     ${dim('环境体检：git / credential.helper / SSH vs insteadOf / insteadOf 冲突（零 token）')}`);
+  info(`  ${PROGRAM} completion <shell>  ${dim('打印 bash|zsh|fish|pwsh 静态补全脚本')}`);
   info(`  ${PROGRAM} remote [list | mirror <url> | unmirror] [--remote <name>]`);
   info(`      ${dim('管理当前仓库远程：mirror 设多个 pushurl，git push 同时推原始远程与镜像（默认 origin）')}`);
   info(`      ${dim('fetch 与凭据不受影响——gitid 只写非密钥配置（ADR-016）')}`);
@@ -549,7 +712,7 @@ function parseArgs(argv) {
       const eq = body.indexOf('=');
       if (eq >= 0) { flags[body.slice(0, eq)] = body.slice(eq + 1); continue; }
       const key = body;
-      if (FLAG_WITH_VALUE.has(key) && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
+      if (FLAG_WITH_VALUE.has(key) && i + 1 < argv.length && (!argv[i + 1].startsWith('-') || argv[i + 1] === '-')) {
         const val = argv[i + 1];
         if (flags[key] !== undefined) flags[key] = [].concat(flags[key], val);
         else flags[key] = val;
@@ -579,6 +742,9 @@ const COMMANDS = {
   rm: cmdRemove,
   import: cmdImport,
   scan: cmdScan,
+  audit: cmdAudit,
+  doctor: cmdDoctor,
+  completion: cmdCompletion,
   remote: cmdRemote,
   credential: cmdCredential,
   help: cmdHelp,
@@ -612,5 +778,5 @@ for (const stream of [process.stdout, process.stderr]) {
 
 main().catch((e) => {
   fail(e instanceof GitidError ? e.message : (e && e.stack) ? e.stack : String(e));
-  process.exit(1);
+  process.exit(e instanceof GitidError && e.code ? e.code : 1);
 });

@@ -429,3 +429,236 @@ test('配置档案写入位置与原子性', () => {
   assert.ok(!fs.existsSync(`${p}.tmp-${process.pid}`));
   JSON.parse(fs.readFileSync(p, 'utf8')); // 可解析
 });
+
+test('add --format + use 写入/unset gpg.format', () => {
+  const sb = makeSandbox();
+  const add = sb.run(['add', 'ssh', '--name', 'A', '--email', 'a@x.com', '--signingkey', 'KEY-SSH', '--format', 'ssh']);
+  assert.equal(add.code, 0, add.err);
+  assert.match(add.out, /格式 ssh/);
+  const store = JSON.parse(fs.readFileSync(path.join(sb.home, '.config/gitid/config.json'), 'utf8'));
+  assert.equal(store.identities.ssh.gpgFormat, 'ssh');
+
+  assert.equal(sb.run(['use', 'ssh']).code, 0);
+  assert.equal(sb.git(['config', '--global', '--get', 'gpg.format']).out, 'ssh');
+  const cur = sb.run(['current']);
+  assert.match(cur.out, /gpg\.format\s+ssh\s+← 全局/);
+
+  sb.run(['add', 'plain', '--name', 'B', '--email', 'b@x.com']);
+  assert.equal(sb.run(['use', 'plain']).code, 0);
+  assert.notEqual(sb.git(['config', '--global', '--get', 'gpg.format']).code, 0);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(sb.home, '.config/gitid/config.json'), 'utf8')).identities.plain.gpgFormat, undefined);
+
+  const bad = sb.run(['add', 'x', '--name', 'X', '--email', 'x@x.com', '--format', 'smime']);
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /签名格式只允许 openpgp \/ ssh \/ x509/);
+});
+
+test('import --scan 收编 unknown，跳过已在库，--dry-run', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  sb.run(['use', 'work']);
+
+  const covered = sb.repo('covered');
+  sb.run(['local', 'work'], covered);
+
+  const unk1 = sb.repo('unk1');
+  sb.git(['config', '--local', 'user.name', 'someone'], unk1);
+  sb.git(['config', '--local', 'user.email', 'someone@else.io'], unk1);
+  const unk2 = sb.repo('unk2');
+  sb.git(['config', '--local', 'user.name', 'someone'], unk2);
+  sb.git(['config', '--local', 'user.email', 'someone@else.io'], unk2);
+  sb.git(['config', '--local', 'user.signingkey', 'OTHER'], unk2);
+
+  const dry = sb.run(['import', '--scan', path.join(sb.home, 'repos'), '--dry-run']);
+  assert.equal(dry.code, 0, dry.err);
+  assert.match(dry.out, /将新增|演练/);
+  const before = JSON.parse(fs.readFileSync(path.join(sb.home, '.config/gitid/config.json'), 'utf8'));
+  assert.equal(before.identities.someone, undefined);
+
+  const r = sb.run(['import', '--scan', path.join(sb.home, 'repos')]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /新增/);
+  assert.match(r.out, /someone/);
+  assert.match(r.out, /跳过/);
+  const after = JSON.parse(fs.readFileSync(path.join(sb.home, '.config/gitid/config.json'), 'utf8'));
+  assert.equal(after.identities.someone.email, 'someone@else.io');
+  assert.equal(after.identities.work.email, 'zhangsan@corp.com');
+
+  const again = sb.run(['import', '--scan', path.join(sb.home, 'repos')]);
+  assert.equal(again.code, 0, again.err);
+  assert.match(again.out, /没有可收编的手配|跳过/);
+
+  const extra = sb.repo('other');
+  sb.git(['config', '--local', 'user.name', 'other'], extra);
+  sb.git(['config', '--local', 'user.email', 'other@else.io'], extra);
+  const extra2 = sb.repo('third');
+  sb.git(['config', '--local', 'user.name', 'third'], extra2);
+  sb.git(['config', '--local', 'user.email', 'third@else.io'], extra2);
+  const asMulti = sb.run(['import', '--scan', path.join(sb.home, 'repos'), '--as', 'bundle']);
+  assert.equal(asMulti.code, 1);
+  assert.match(asMulti.err, /多条手配请去掉 --as/);
+
+  const missing = sb.run(['import', '--scan', path.join(sb.home, 'no-such-dir')]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.err, /目录不存在/);
+});
+
+test('use --repos 多仓本地写入，不动全局', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  sb.run(['add', 'personal', '--name', 'tony', '--email', 'tony@me.dev']);
+  sb.run(['use', 'personal']);
+
+  const a = sb.repo('alpha');
+  const b = sb.repo('beta');
+  const r = sb.run(['use', 'work', '--repos', a, '--repos', b]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(sb.git(['config', '--local', '--get', 'user.email'], a).out, 'zhangsan@corp.com');
+  assert.equal(sb.git(['config', '--local', '--get', 'user.email'], b).out, 'zhangsan@corp.com');
+  assert.equal(sb.git(['config', '--global', '--get', 'user.email']).out, 'tony@me.dev');
+
+  const nope = path.join(sb.home, 'not-a-repo');
+  fs.mkdirSync(nope, { recursive: true });
+  const partial = sb.run(['use', 'work', '--repos', a, '--repos', nope]);
+  assert.equal(partial.code, 2);
+  assert.match(partial.err, /不是 git 仓库/);
+  assert.match(partial.out, /alpha|已将身份/);
+});
+
+test('use --repos-from 默认只 missing', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+
+  const miss = sb.repo('miss');
+  const unk = sb.repo('unk');
+  sb.git(['config', '--local', 'user.name', 'someone'], unk);
+  sb.git(['config', '--local', 'user.email', 'someone@else.io'], unk);
+
+  const scan = sb.run(['scan', path.join(sb.home, 'repos'), '--json']);
+  assert.equal(scan.code, 0, scan.err);
+  const report = JSON.parse(scan.out);
+  assert.ok(report.rows.some((row) => row.status === 'missing'));
+  assert.ok(report.rows.some((row) => row.status === 'unknown'));
+
+  const file = path.join(sb.home, 'scan.json');
+  fs.writeFileSync(file, scan.out);
+  const r = sb.run(['use', 'work', '--repos-from', file]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(sb.git(['config', '--local', '--get', 'user.email'], miss).out, 'zhangsan@corp.com');
+  assert.equal(sb.git(['config', '--local', '--get', 'user.email'], unk).out, 'someone@else.io');
+
+  const junk = path.join(sb.home, 'junk.json');
+  fs.writeFileSync(junk, '{"nope":true}');
+  const invalid = sb.run(['use', 'work', '--repos-from', junk]);
+  assert.equal(invalid.code, 1);
+  assert.match(invalid.err, /不是 gitid scan --json 结构/);
+});
+
+test('scan --json / --format csv', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  sb.run(['use', 'work']);
+  sb.repo('demo');
+
+  const js = sb.run(['scan', path.join(sb.home, 'repos'), '--json']);
+  assert.equal(js.code, 0, js.err);
+  const data = JSON.parse(js.out);
+  assert.ok(Array.isArray(data.rows));
+  assert.ok(data.summary && typeof data.summary.total === 'number');
+  assert.equal(data.summary.total, 1);
+  assert.ok(data.rows[0].path);
+  assert.ok(['ok', 'missing', 'unknown'].includes(data.rows[0].status));
+
+  const csv = sb.run(['scan', path.join(sb.home, 'repos'), '--format', 'csv']);
+  assert.equal(csv.code, 0, csv.err);
+  const header = csv.out.split(/\r?\n/)[0];
+  assert.equal(header, 'status,identityId,hasLocal,name,email,remotes,path');
+  assert.match(csv.out, /demo/);
+
+  const bad = sb.run(['scan', path.join(sb.home, 'repos'), '--format', 'xml']);
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /导出格式只允许 json \/ markdown \/ csv/);
+});
+
+test('audit 聚合 + --expect 污染', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  const repo = sb.repo('hist');
+  sb.git(['config', '--local', 'user.name', '张三'], repo);
+  sb.git(['config', '--local', 'user.email', 'zhangsan@corp.com'], repo);
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+  assert.equal(sb.git(['add', 'a.txt'], repo).code, 0);
+  assert.equal(sb.git(['commit', '-q', '-m', 'c1'], repo).code, 0);
+
+  sb.git(['config', '--local', 'user.name', 'other'], repo);
+  sb.git(['config', '--local', 'user.email', 'other@else.io'], repo);
+  fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+  assert.equal(sb.git(['add', 'b.txt'], repo).code, 0);
+  assert.equal(sb.git(['commit', '-q', '-m', 'c2'], repo).code, 0);
+
+  const r = sb.run(['audit', repo]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /zhangsan@corp\.com/);
+  assert.match(r.out, /other@else\.io/);
+  assert.match(r.out, /work/);
+  assert.match(r.out, /mailmap 建议/);
+
+  const exp = sb.run(['audit', repo, '--expect', 'work', '--json']);
+  assert.equal(exp.code, 0, exp.err);
+  const report = JSON.parse(exp.out);
+  assert.equal(report.expectId, 'work');
+  const polluted = report.authors.filter((a) => a.polluted);
+  assert.ok(polluted.some((a) => a.email === 'other@else.io'));
+  assert.ok(report.authors.some((a) => a.email === 'zhangsan@corp.com' && a.polluted === false));
+
+  const ghost = sb.run(['audit', repo, '--expect', 'ghost']);
+  assert.equal(ghost.code, 1);
+  assert.match(ghost.err, /身份「ghost」不存在/);
+
+  const notRepo = sb.run(['audit', sb.home]);
+  assert.equal(notRepo.code, 1);
+  assert.match(notRepo.err, /不是 git 仓库/);
+});
+
+test('doctor 结构', () => {
+  const sb = makeSandbox();
+  const fail = sb.run(['doctor', '--json']);
+  assert.equal(fail.code, 2, fail.err);
+  const report = JSON.parse(fail.out);
+  assert.deepEqual(report.checks.map((c) => c.id), ['git-version', 'credential-helper', 'ssh-insteadof', 'insteadof-conflict']);
+  assert.ok(report.checks.every((c) => ['ok', 'warn', 'fail'].includes(c.level)));
+  assert.equal(report.checks.find((c) => c.id === 'credential-helper').level, 'fail');
+  assert.ok(!JSON.stringify(report).toLowerCase().includes('token'));
+
+  const credFile = path.join(sb.home, 'creds').replace(/\\/g, '/');
+  sb.git(['config', '--global', 'credential.helper', `store --file ${credFile}`]);
+  const ok = sb.run(['doctor', '--json']);
+  assert.equal(ok.code, 0, ok.err);
+  const report2 = JSON.parse(ok.out);
+  assert.equal(report2.checks.find((c) => c.id === 'credential-helper').level, 'ok');
+  assert.ok(report2.helper);
+  assert.equal(report2.checks.find((c) => c.id === 'git-version').level, 'ok');
+
+  const extra = sb.run(['doctor', 'nope']);
+  assert.equal(extra.code, 1);
+});
+
+test('completion bash 且未知 shell 退出 1', () => {
+  const sb = makeSandbox();
+  const r = sb.run(['completion', 'bash']);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /complete -F _gitid gitid/);
+  assert.match(r.out, /audit/);
+  assert.match(r.out, /doctor/);
+  assert.match(r.out, /--repos-from/);
+  assert.match(r.out, /--include-unknown/);
+  assert.match(r.out, /--format/);
+
+  const zsh = sb.run(['completion', 'zsh']);
+  assert.equal(zsh.code, 0, zsh.err);
+  assert.match(zsh.out, /#compdef gitid/);
+
+  const bad = sb.run(['completion', 'cmd']);
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /未知 shell/);
+});

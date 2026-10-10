@@ -82,9 +82,37 @@ test('core 设置：默认扫描目录读写与校验（沙箱）', () => {
   const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env });
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout.trim());
-  assert.deepEqual(out.before, { scanRoot: '', scanDepth: 6 });
-  assert.deepEqual(out.after, { scanRoot: '~/Projects', scanDepth: 4 });
+  assert.deepEqual(out.before, { scanRoot: '', scanDepth: 6, locale: 'zh' });
+  assert.deepEqual(out.after, { scanRoot: '~/Projects', scanDepth: 4, locale: 'zh' });
   assert.match(out.thrown, /scanDepth/);
+});
+
+test('core 设置：locale 只允许 zh|en（沙箱）', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gitid-desktop-locale-'));
+  const env = {
+    ...process.env,
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    GITID_CONFIG: path.join(home, '.config/gitid/config.json'),
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const script = `
+    const core = require(${JSON.stringify(path.resolve(here, '../main/core.js'))});
+    const store = core.loadStore();
+    core.saveSettings(store, { locale: 'en' });
+    const en = core.getSettings(store);
+    core.saveSettings(store, { locale: 'zh' });
+    const zh = core.getSettings(store);
+    let thrown = '';
+    try { core.saveSettings(store, { locale: 'fr' }); } catch (e) { thrown = e.message; }
+    console.log(JSON.stringify({ en: en.locale, zh: zh.locale, thrown }));
+  `;
+  const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim());
+  assert.equal(out.en, 'en');
+  assert.equal(out.zh, 'zh');
+  assert.match(out.thrown, /locale/);
 });
 
 test('core：insteadOf 覆盖语义与远程镜像管理（沙箱）', () => {

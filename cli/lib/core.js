@@ -12,9 +12,16 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-class GitidError extends Error {}
+class GitidError extends Error {
+  constructor(message, code = 1) {
+    super(message);
+    this.name = 'GitidError';
+    this.code = code;
+  }
+}
 
-const IDENTITY_KEYS = ['user.name', 'user.email', 'user.signingkey', 'commit.gpgsign'];
+const IDENTITY_KEYS = ['user.name', 'user.email', 'user.signingkey', 'commit.gpgsign', 'gpg.format'];
+const GPG_FORMATS = new Set(['openpgp', 'ssh', 'x509']);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SCAN_SKIP = new Set([
@@ -73,6 +80,11 @@ function upsertIdentity(store, id, fields) {
   const exists = !!store.identities[id];
   const it = { name: fields.name, email: fields.email, signingkey: fields.signingkey || '' };
   if (fields.gpgsign === true) it.gpgsign = true;
+  if (fields.gpgFormat !== undefined && fields.gpgFormat !== null && fields.gpgFormat !== '') {
+    const fmt = String(fields.gpgFormat).trim();
+    if (!GPG_FORMATS.has(fmt)) throw new GitidError('签名格式只允许 openpgp / ssh / x509');
+    it.gpgFormat = fmt;
+  }
   if (fields.insteadOf !== undefined) {
     if (!Array.isArray(fields.insteadOf)) throw new GitidError('insteadOf 需为 [{original, url}] 数组');
     const seen = new Set();
@@ -124,10 +136,11 @@ function getIdentity(store, id) {
   return it;
 }
 
-// ---------- 设置（与身份档案同存 config.json；目前为默认扫描目录/深度） ----------
+// ---------- 设置（与身份档案同存 config.json：扫描目录/深度 + 界面语言） ----------
 
 const DEFAULT_SCAN_DEPTH = 6;
 const SCAN_DEPTH_MAX = 12;
+const LOCALES = new Set(['zh', 'en']);
 
 // 归一化读取：旧档案无 settings 或字段缺失时返回默认值，不抛错
 function getSettings(store) {
@@ -135,6 +148,7 @@ function getSettings(store) {
   return {
     scanRoot: typeof raw.scanRoot === 'string' ? raw.scanRoot : '',
     scanDepth: Number.isInteger(raw.scanDepth) && raw.scanDepth >= 1 ? raw.scanDepth : DEFAULT_SCAN_DEPTH,
+    locale: LOCALES.has(raw.locale) ? raw.locale : 'zh',
   };
 }
 
@@ -147,6 +161,7 @@ function saveSettings(store, patch = {}) {
   if (!Number.isInteger(next.scanDepth) || next.scanDepth < 1 || next.scanDepth > SCAN_DEPTH_MAX) {
     throw new GitidError(`scanDepth 需为 1-${SCAN_DEPTH_MAX} 的整数：${next.scanDepth}`);
   }
+  if (!LOCALES.has(next.locale)) throw new GitidError(`locale 只允许 zh / en：${next.locale}`);
   store.settings = next;
   return store;
 }
@@ -208,6 +223,7 @@ function readApplied(scope, store, { cwd } = {}) {
     email: cfgGet(scope, 'user.email', { cwd }),
     signingkey: cfgGet(scope, 'user.signingkey', { cwd }),
     gpgsign: cfgGet(scope, 'commit.gpgsign', { cwd }),
+    gpgFormat: cfgGet(scope, 'gpg.format', { cwd }),
     identityId: matchIdentity(store, cfgGet(scope, 'user.name', { cwd }), cfgGet(scope, 'user.email', { cwd })),
   };
 }
@@ -224,8 +240,8 @@ function extraConfigKeys(it) {
   return keys;
 }
 
-// 全量覆盖语义：身份没有的键（signingkey/gpgsign/extra/insteadOf）会被 unset，
-// 不残留上一身份的签名与 URL 重写配置（ADR-003/016）
+// 全量覆盖语义：身份没有的键（signingkey/gpgsign/gpg.format/extra/insteadOf）会被 unset，
+// 不残留上一身份的签名、格式与 URL 重写配置（ADR-003/016）
 function applyIdentity(it, scope, { cwd, store } = {}) {
   const before = {};
   const watch = new Set(IDENTITY_KEYS);
@@ -257,6 +273,8 @@ function applyIdentity(it, scope, { cwd, store } = {}) {
   else cfgUnset(scope, 'user.signingkey', { cwd });
   if (it.gpgsign === true) cfgSet(scope, 'commit.gpgsign', 'true', { cwd });
   else cfgUnset(scope, 'commit.gpgsign', { cwd });
+  if (it.gpgFormat) cfgSet(scope, 'gpg.format', it.gpgFormat, { cwd });
+  else cfgUnset(scope, 'gpg.format', { cwd });
   for (const [k, v] of Object.entries(it.extra || {})) cfgSet(scope, k, v, { cwd });
   for (const p of it.insteadOf || []) cfgSet(scope, insteadOfConfigKey(p), p.original, { cwd });
   for (const a of it.accounts || []) cfgSet(scope, accountConfigKey(a), a.username, { cwd });
@@ -270,6 +288,7 @@ function applyIdentity(it, scope, { cwd, store } = {}) {
   record('user.email', it.email);
   record('user.signingkey', it.signingkey || undefined);
   record('commit.gpgsign', it.gpgsign === true ? 'true' : undefined);
+  record('gpg.format', it.gpgFormat || undefined);
   for (const [k, v] of Object.entries(it.extra || {})) record(k, v);
   for (const p of it.insteadOf || []) record(insteadOfConfigKey(p), p.original);
   for (const a of it.accounts || []) record(accountConfigKey(a), a.username);
@@ -588,9 +607,516 @@ function scanRepos(store, root, depth = 6) {
   return { rows, summary };
 }
 
+// ---------- 扫描收编 / 批量本地应用 / 导出 / 审计 / 体检 / 补全 ----------
+
+function identityIdFromEmail(email) {
+  const local = String(email || '').split('@')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return local && ID_PATTERN.test(local) ? local : 'imported';
+}
+
+function uniqueIdentityId(store, base) {
+  if (!store.identities[base]) return base;
+  let n = 2;
+  while (store.identities[`${base}-${n}`]) n += 1;
+  return `${base}-${n}`;
+}
+
+function readEffectiveIdentity(cwd) {
+  return {
+    name: cfgGetEffective('user.name', { cwd }),
+    email: cfgGetEffective('user.email', { cwd }),
+    signingkey: cfgGetEffective('user.signingkey', { cwd }) || '',
+    gpgsign: cfgGetEffective('commit.gpgsign', { cwd }) === 'true',
+    gpgFormat: cfgGetEffective('gpg.format', { cwd }) || '',
+  };
+}
+
+function identitySig(it) {
+  return `${it.signingkey || ''}\t${it.gpgFormat || ''}\t${it.gpgsign === true ? '1' : ''}`;
+}
+
+// 仅收编 status=unknown；同 name+email 已在库则跳过；id 撞车 -2 递增。
+// asId 用于单条；多条时由调用方先拦截。dryRun 不写 Store。
+function importScanUnknown(store, root, depth, { dryRun = false, asId } = {}) {
+  const { rows } = scanRepos(store, root, depth);
+  const unknowns = rows.filter((r) => r.status === 'unknown');
+  if (asId && unknowns.length > 1) throw new GitidError('多条手配请去掉 --as 或先筛目录');
+
+  const imported = [];
+  const skipped = [];
+  const warnings = [];
+  const seen = new Set();
+
+  for (const row of unknowns) {
+    const name = row.effective.name;
+    const email = row.effective.email;
+    const pair = `${name}\t${email}`;
+    const existingId = matchIdentity(store, name, email) || (seen.has(pair) ? imported.find((x) => `${x.name}\t${x.email}` === pair)?.id : null);
+    const live = readEffectiveIdentity(row.path);
+
+    if (existingId) {
+      const prev = store.identities[existingId] || imported.find((x) => x.id === existingId);
+      if (prev && identitySig(prev) !== identitySig(live)) {
+        warnings.push({
+          id: existingId,
+          name,
+          email,
+          path: row.path,
+          message: `同名邮不同签名，先到者胜（已保留 ${existingId}）`,
+        });
+      }
+      skipped.push({ id: existingId, name, email, path: row.path, reason: 'already' });
+      continue;
+    }
+
+    const id = asId || uniqueIdentityId(store, identityIdFromEmail(email));
+    if (!dryRun) {
+      upsertIdentity(store, id, {
+        name,
+        email,
+        signingkey: live.signingkey,
+        gpgsign: live.gpgsign || null,
+        gpgFormat: live.gpgFormat,
+      });
+    }
+    seen.add(pair);
+    imported.push({ id, name, email, path: row.path, signingkey: live.signingkey, gpgFormat: live.gpgFormat });
+  }
+
+  return { imported, skipped, warnings };
+}
+
+function parseScanReposFrom(jsonText, { includeUnknown = false } = {}) {
+  let data = jsonText;
+  if (typeof jsonText === 'string') {
+    try { data = JSON.parse(jsonText); } catch { throw new GitidError('文件不是 gitid scan --json 结构'); }
+  }
+  if (!data || typeof data !== 'object' || !Array.isArray(data.rows)) {
+    throw new GitidError('文件不是 gitid scan --json 结构');
+  }
+  const paths = [];
+  for (const row of data.rows) {
+    if (!row || typeof row !== 'object' || !row.path) continue;
+    if (row.status === 'missing' || (includeUnknown && row.status === 'unknown')) {
+      paths.push(String(row.path));
+    }
+  }
+  return paths;
+}
+
+function applyIdentityLocalBatch(store, it, repos) {
+  const results = [];
+  for (const raw of repos) {
+    const p = path.resolve(String(raw));
+    const root = repoRoot(p);
+    if (!root) {
+      results.push({ path: p, ok: false, error: `不是 git 仓库：${p}` });
+      continue;
+    }
+    try {
+      const changes = applyIdentity(it, 'local', { cwd: root, store });
+      results.push({ path: root, ok: true, changes });
+    } catch (e) {
+      results.push({ path: p, ok: false, error: e.message });
+    }
+  }
+  return results;
+}
+
+function csvEscape(value) {
+  const s = value === undefined || value === null ? '' : String(value);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function formatScanReport({ rows, summary }, format) {
+  const fmt = String(format || '').toLowerCase();
+  if (fmt === 'json') return JSON.stringify({ rows, summary }, null, 2) + '\n';
+  if (fmt === 'csv') {
+    const header = 'status,identityId,hasLocal,name,email,remotes,path';
+    const lines = (rows || []).map((r) => {
+      const remotes = (r.remotes || []).map((x) => x.name + (x.mirror ? '⊕' : '')).join(' ');
+      return [
+        r.status,
+        r.identityId || '',
+        r.hasLocal,
+        (r.effective && r.effective.name) || '',
+        (r.effective && r.effective.email) || '',
+        remotes,
+        r.path,
+      ].map(csvEscape).join(',');
+    });
+    return [header, ...lines].join('\n') + '\n';
+  }
+  if (fmt === 'markdown') {
+    const lines = [
+      '| status | identity | hasLocal | name | email | remotes | path |',
+      '| --- | --- | --- | --- | --- | --- | --- |',
+    ];
+    for (const r of rows || []) {
+      const remotes = (r.remotes || []).map((x) => x.name + (x.mirror ? '⊕' : '')).join(' ') || '—';
+      const cells = [
+        r.status,
+        r.identityId || (r.hasLocal ? '手配' : '继承'),
+        r.hasLocal ? 'yes' : 'no',
+        (r.effective && r.effective.name) || '',
+        (r.effective && r.effective.email) || '',
+        remotes,
+        r.rel || r.path,
+      ].map((c) => String(c).replace(/\|/g, '\\|'));
+      lines.push(`| ${cells.join(' | ')} |`);
+    }
+    const s = summary || {};
+    lines.push('');
+    lines.push(`共 ${s.total || 0} 个仓库：${s.withLocal || 0} 个本地覆盖 · ${s.missing || 0} 个配置缺失 · ${s.unknown || 0} 个未匹配已存身份${s.mirrored ? ` · ${s.mirrored} 个镜像推送` : ''}`);
+    return lines.join('\n') + '\n';
+  }
+  throw new GitidError('导出格式只允许 json / markdown / csv');
+}
+
+function buildMailmapSuggestion(authors, expect) {
+  if (!authors.length) return '';
+  const lines = [];
+  if (expect) {
+    lines.push(`${expect.name} <${expect.email}>`);
+    for (const a of authors) {
+      if (a.name !== expect.name || a.email !== expect.email) {
+        lines.push(`${expect.name} <${expect.email}> ${a.name} <${a.email}>`);
+      }
+    }
+    return lines.join('\n');
+  }
+  const byEmail = new Map();
+  for (const a of authors) {
+    if (!byEmail.has(a.email)) byEmail.set(a.email, []);
+    byEmail.get(a.email).push(a);
+  }
+  for (const [email, group] of byEmail) {
+    const canonical = [...group].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))[0];
+    lines.push(`${canonical.name} <${email}>`);
+    for (const a of group) {
+      if (a.name !== canonical.name) lines.push(`${canonical.name} <${email}> ${a.name} <${email}>`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function auditRepo(store, repoPath, { expectId } = {}) {
+  const root = repoRoot(repoPath || process.cwd());
+  if (!root) throw new GitidError(`不是 git 仓库：${repoPath || process.cwd()}`);
+  let expect = null;
+  if (expectId) expect = getIdentity(store, expectId);
+
+  const r = git(['log', '--all', '--format=%aN%x09%aE'], { allowFail: true, cwd: root });
+  if (!r.ok) {
+    const err = `${r.err} ${r.out}`.toLowerCase();
+    const empty = /does not have any commits|no commits yet|bad default revision|unknown revision|ambiguous argument/.test(err)
+      || (r.status === 128 && !r.out);
+    if (!empty) throw new GitidError(`git log 失败：${r.err || r.out || '未知错误'}`, 2);
+  }
+
+  const counts = new Map();
+  if (r.ok && r.out) {
+    for (const line of r.out.split('\n')) {
+      if (!line) continue;
+      const tab = line.indexOf('\t');
+      const name = tab >= 0 ? line.slice(0, tab) : line;
+      const email = tab >= 0 ? line.slice(tab + 1) : '';
+      const key = `${name}\t${email}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+
+  const authors = [...counts.entries()].map(([key, count]) => {
+    const tab = key.indexOf('\t');
+    const name = key.slice(0, tab);
+    const email = key.slice(tab + 1);
+    const matchId = matchIdentity(store, name, email);
+    const polluted = expect ? email !== expect.email : null;
+    return { name, email, count, matchId, polluted };
+  }).sort((a, b) => b.count - a.count || a.email.localeCompare(b.email) || a.name.localeCompare(b.name));
+
+  return {
+    repo: root,
+    authors,
+    mailmapSuggestion: buildMailmapSuggestion(authors, expect),
+    expectId: expectId || null,
+  };
+}
+
+function hostFromGitUrl(url) {
+  const s = String(url || '');
+  let m = s.match(/^https?:\/\/([^/:]+)/i);
+  if (m) return m[1].toLowerCase();
+  m = s.match(/^git@([^:]+):/i);
+  if (m) return m[1].toLowerCase();
+  m = s.match(/^ssh:\/\/(?:[^@/]+@)?([^/:]+)/i);
+  if (m) return m[1].toLowerCase();
+  return '';
+}
+
+function parseSshConfig(text) {
+  const hosts = [];
+  let current = null;
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    const m = line.match(/^(Host|HostName|Hostname)\s+(\S+)/i);
+    if (!m) continue;
+    const key = m[1].toLowerCase();
+    const val = m[2];
+    if (key === 'host') {
+      if (val === '*') { current = null; continue; }
+      current = { host: val, hostName: null };
+      hosts.push(current);
+    } else if (current) {
+      current.hostName = val;
+    }
+  }
+  return hosts;
+}
+
+function collectInsteadOfPairs(store) {
+  const pairs = [];
+  for (const w of listUrlRewrites()) pairs.push({ original: w.original, url: w.url, source: 'git' });
+  for (const [id, it] of Object.entries((store && store.identities) || {})) {
+    for (const p of it.insteadOf || []) pairs.push({ original: p.original, url: p.url, source: `identity:${id}` });
+  }
+  return pairs;
+}
+
+function checkInsteadOfConflicts(store) {
+  const groups = [];
+  const gitPairs = listUrlRewrites().map((w) => ({ original: w.original, url: w.url, source: 'git' }));
+  groups.push(gitPairs);
+  for (const [id, it] of Object.entries((store && store.identities) || {})) {
+    groups.push((it.insteadOf || []).map((p) => ({ original: p.original, url: p.url, source: `identity:${id}` })));
+  }
+  const applied = store ? readApplied('global', store) : null;
+  const appliedIt = applied && applied.identityId ? store.identities[applied.identityId] : null;
+  if (appliedIt && gitPairs.length) {
+    groups.push([
+      ...gitPairs,
+      ...(appliedIt.insteadOf || []).map((p) => ({ original: p.original, url: p.url, source: `identity:${applied.identityId}` })),
+    ]);
+  }
+  const conflicts = [];
+  const seen = new Set();
+  for (const pairs of groups) {
+    const byOriginal = new Map();
+    for (const p of pairs) {
+      if (!byOriginal.has(p.original)) byOriginal.set(p.original, []);
+      byOriginal.get(p.original).push(p);
+    }
+    for (const [original, entries] of byOriginal) {
+      const urls = new Set(entries.map((e) => e.url));
+      if (urls.size > 1 && !seen.has(original)) {
+        seen.add(original);
+        conflicts.push({ original, entries });
+      }
+    }
+  }
+  return conflicts;
+}
+
+function checkSshInsteadOf(store) {
+  const sshPath = path.join(os.homedir(), '.ssh', 'config');
+  let sshText = '';
+  try { sshText = fs.readFileSync(sshPath, 'utf8'); } catch { /* 无配置 */ }
+  const sshHosts = parseSshConfig(sshText);
+  const pairs = collectInsteadOfPairs(store);
+  const sshNames = new Set();
+  for (const h of sshHosts) {
+    sshNames.add(h.host.toLowerCase());
+    if (h.hostName) sshNames.add(h.hostName.toLowerCase());
+  }
+  const sshStyle = pairs.filter((p) => /^(git@|ssh:\/\/)/i.test(p.url));
+  if (!sshHosts.length && !sshStyle.length) {
+    return { level: 'ok', message: '无 SSH 别名与 insteadOf 可对照' };
+  }
+  if (sshStyle.length) {
+    const missing = sshStyle.filter((p) => {
+      const host = hostFromGitUrl(p.url);
+      return host && !sshNames.has(host);
+    });
+    if (missing.length && !sshHosts.length) {
+      return { level: 'warn', message: '存在 SSH 形式的 insteadOf，但未找到 ~/.ssh/config', detail: missing.map((p) => p.url).join(', ') };
+    }
+    if (missing.length) {
+      return { level: 'warn', message: 'SSH Host 与 insteadOf 未完全对齐', detail: missing.map((p) => `${p.original}→${p.url}`).join(', ') };
+    }
+    return { level: 'ok', message: 'SSH Host 与 insteadOf 可对应' };
+  }
+  if (sshHosts.length && pairs.length) {
+    const rewriteHosts = pairs.map((p) => hostFromGitUrl(p.original) || hostFromGitUrl(p.url)).filter(Boolean);
+    const overlap = rewriteHosts.some((h) => sshNames.has(h));
+    if (!overlap) return { level: 'warn', message: 'SSH Host 与 insteadOf 主机对不上' };
+  }
+  return { level: 'ok', message: sshHosts.length ? 'SSH 配置无需与 insteadOf 对照' : '无 SSH 形式的 insteadOf' };
+}
+
+function runDoctor(store) {
+  const checks = [];
+  let gitVersion = null;
+  const ver = spawnSync('git', ['--version'], { encoding: 'utf8' });
+  if (ver.error || ver.status !== 0) {
+    checks.push({ id: 'git-version', level: 'fail', message: '未找到 git 命令，请先安装 git', detail: (ver.stderr || '').trim() });
+  } else {
+    gitVersion = (ver.stdout || '').trim();
+    checks.push({ id: 'git-version', level: 'ok', message: gitVersion, detail: gitVersion });
+  }
+
+  let helper = null;
+  const helperR = git(['config', '--get', 'credential.helper'], { allowFail: true });
+  if (!helperR.ok || !helperR.out) {
+    checks.push({ id: 'credential-helper', level: 'fail', message: '未配置 credential.helper', detail: null });
+  } else {
+    helper = helperR.out;
+    checks.push({ id: 'credential-helper', level: 'ok', message: `已配置 ${helper}`, detail: helper });
+  }
+
+  const ssh = checkSshInsteadOf(store);
+  checks.push({ id: 'ssh-insteadof', level: ssh.level, message: ssh.message, detail: ssh.detail || null });
+
+  const conflicts = checkInsteadOfConflicts(store);
+  if (conflicts.length) {
+    const detail = conflicts.map((c) => `${c.original} → ${[...new Set(c.entries.map((e) => e.url))].join(' / ')}`).join('; ');
+    checks.push({ id: 'insteadof-conflict', level: 'fail', message: '同一 original 映射到不同 url，或全局与档案规则互相覆盖', detail });
+  } else {
+    checks.push({ id: 'insteadof-conflict', level: 'ok', message: 'insteadOf 规则无冲突', detail: null });
+  }
+
+  return { checks, gitVersion, helper };
+}
+
+const COMPLETION_SHELLS = new Set(['bash', 'zsh', 'fish', 'pwsh']);
+
+function completionScript(shell) {
+  const name = String(shell || '').toLowerCase();
+  if (!COMPLETION_SHELLS.has(name)) throw new GitidError(`未知 shell：${shell}。支持 bash / zsh / fish / pwsh`);
+  if (name === 'bash') {
+    return `# gitid bash 补全
+_gitid() {
+  local cur prev cmd
+  COMPREPLY=()
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+  cmd="\${COMP_WORDS[1]}"
+  local cmds="add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version"
+  local global="--config --no-color --help --version -h -v"
+  if [[ \$COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "\$cmds \$global" -- "\$cur") )
+    return
+  fi
+  case "\$prev" in
+    --format) COMPREPLY=( $(compgen -W "openpgp ssh x509 json markdown csv" -- "\$cur") ); return ;;
+    --repos|--repos-from|--output|--config|--scan) COMPREPLY=( $(compgen -f -- "\$cur") ); return ;;
+    completion) COMPREPLY=( $(compgen -W "bash zsh fish pwsh" -- "\$cur") ); return ;;
+  esac
+  case "\$cmd" in
+    add) COMPREPLY=( $(compgen -W "--name --email --signingkey --gpgsign --format --set --insteadOf --account \$global" -- "\$cur") ) ;;
+    use|local) COMPREPLY=( $(compgen -W "--local --repos --repos-from --include-unknown \$global" -- "\$cur") ) ;;
+    import) COMPREPLY=( $(compgen -W "--as --scan --depth --dry-run \$global" -- "\$cur") ) ;;
+    scan) COMPREPLY=( $(compgen -W "--depth --save --json --format --output \$global" -- "\$cur") ) ;;
+    audit) COMPREPLY=( $(compgen -W "--expect --json \$global" -- "\$cur") ) ;;
+    doctor) COMPREPLY=( $(compgen -W "--json \$global" -- "\$cur") ) ;;
+    unset) COMPREPLY=( $(compgen -W "--local --global \$global" -- "\$cur") ) ;;
+    remote) COMPREPLY=( $(compgen -W "list mirror unmirror --remote \$global" -- "\$cur") ) ;;
+    credential) COMPREPLY=( $(compgen -W "list login set remove --token-stdin \$global" -- "\$cur") ) ;;
+    completion) COMPREPLY=( $(compgen -W "bash zsh fish pwsh" -- "\$cur") ) ;;
+    *) COMPREPLY=( $(compgen -W "\$global" -- "\$cur") ) ;;
+  esac
+}
+complete -F _gitid gitid
+complete -F _gitid git-id
+`;
+  }
+  if (name === 'zsh') {
+    return `#compdef gitid git-id
+_gitid() {
+  local -a cmds
+  cmds=(
+    'add:新增/更新身份'
+    'list:列出身份'
+    'use:应用身份'
+    'local:本地应用身份'
+    'current:查看生效身份'
+    'unset:清除身份键'
+    'remove:删除档案'
+    'import:导入/收编'
+    'scan:扫描仓库'
+    'remote:远程镜像'
+    'credential:凭据管道'
+    'audit:提交历史审计'
+    'doctor:环境体检'
+    'completion:打印补全脚本'
+    'help:帮助'
+    'version:版本'
+  )
+  if (( CURRENT == 2 )); then
+    _describe 'command' cmds
+    return
+  fi
+  case \$words[2] in
+    add) _arguments '--name[姓名]' '--email[邮箱]' '--signingkey[签名键]' '--gpgsign' '--format[签名格式]:fmt:(openpgp ssh x509)' '--set[自定义键]' '--insteadOf[URL重写]' '--account[凭据选择器]' ;;
+    use|local) _arguments '--local' '--repos[仓库路径]:path:_files -/' '--repos-from[scan JSON]:file:_files' '--include-unknown' ;;
+    import) _arguments '--as[id]' '--scan[扫描收编]:dir:_files -/' '--depth[深度]' '--dry-run' ;;
+    scan) _arguments '--depth[深度]' '--save' '--json' '--format[导出格式]:fmt:(json markdown csv)' '--output[文件]:file:_files' ;;
+    audit) _arguments '--expect[档案 id]' '--json' ;;
+    doctor) _arguments '--json' ;;
+    completion) _arguments '1:shell:(bash zsh fish pwsh)' ;;
+  esac
+}
+_gitid
+`;
+  }
+  if (name === 'fish') {
+    return `# gitid fish 补全
+complete -c gitid -f
+complete -c git-id -f
+set -l gitid_cmds add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version
+for c in add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version
+  complete -c gitid -n "not __fish_seen_subcommand_from \$gitid_cmds" -a \$c
+  complete -c git-id -n "not __fish_seen_subcommand_from \$gitid_cmds" -a \$c
+end
+complete -c gitid -n "__fish_seen_subcommand_from add" -l name -l email -l signingkey -l gpgsign -l format -l set -l insteadOf -l account
+complete -c gitid -n "__fish_seen_subcommand_from use local" -l local -l repos -l repos-from -l include-unknown
+complete -c gitid -n "__fish_seen_subcommand_from import" -l as -l scan -l depth -l dry-run
+complete -c gitid -n "__fish_seen_subcommand_from scan" -l depth -l save -l json -l format -l output
+complete -c gitid -n "__fish_seen_subcommand_from audit" -l expect -l json
+complete -c gitid -n "__fish_seen_subcommand_from doctor" -l json
+complete -c gitid -n "__fish_seen_subcommand_from unset" -l local -l global
+complete -c gitid -n "__fish_seen_subcommand_from completion" -a "bash zsh fish pwsh"
+complete -c gitid -l config -l no-color -s h -l help -s v -l version
+`;
+  }
+  return `# gitid PowerShell 补全
+Register-ArgumentCompleter -Native -CommandName gitid, git-id -ScriptBlock {
+  param(\$wordToComplete, \$commandAst, \$cursorPosition)
+  \$cmds = @('add','list','ls','use','local','current','cur','unset','remove','rm','import','scan','remote','credential','audit','doctor','completion','help','version')
+  \$tokens = \$commandAst.ToString().Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+  if (\$tokens.Count -le 1) { \$cmds | Where-Object { \$_ -like "\$wordToComplete*" } | ForEach-Object { \$_ } ; return }
+  \$cmd = \$tokens[1]
+  \$opts = switch (\$cmd) {
+    'add' { @('--name','--email','--signingkey','--gpgsign','--format','--set','--insteadOf','--account') }
+    { \$_ -in 'use','local' } { @('--local','--repos','--repos-from','--include-unknown') }
+    'import' { @('--as','--scan','--depth','--dry-run') }
+    'scan' { @('--depth','--save','--json','--format','--output') }
+    'audit' { @('--expect','--json') }
+    'doctor' { @('--json') }
+    'unset' { @('--local','--global') }
+    'completion' { @('bash','zsh','fish','pwsh') }
+    default { @('--config','--no-color','--help','--version') }
+  }
+  \$opts | Where-Object { \$_ -like "\$wordToComplete*" }
+}
+`;
+}
+
 module.exports = {
   GitidError,
   IDENTITY_KEYS,
+  GPG_FORMATS,
   ID_PATTERN,
   EMAIL_PATTERN,
   configPath,
@@ -624,4 +1150,13 @@ module.exports = {
   credentialList,
   findRepos,
   scanRepos,
+  identityIdFromEmail,
+  uniqueIdentityId,
+  importScanUnknown,
+  parseScanReposFrom,
+  applyIdentityLocalBatch,
+  formatScanReport,
+  auditRepo,
+  runDoctor,
+  completionScript,
 };

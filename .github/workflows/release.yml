@@ -52,6 +52,7 @@ jobs:
             desktop/dist/*.AppImage
             desktop/dist/*.deb
             desktop/dist/*.rpm
+            desktop/dist/latest*.yml
 
   build-windows:
     needs: test
@@ -70,7 +71,10 @@ jobs:
         with:
           name: dist-windows
           if-no-files-found: error
-          path: desktop/dist/*.exe
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/latest*.yml
+            desktop/dist/*.blockmap
 
   release:
     needs: [build-linux, build-windows]
@@ -88,7 +92,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           REPO="${GITHUB_REPOSITORY}"
           mkdir -p assets
-          find dist -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.exe' \) -exec cp {} assets/ \;
+          find dist -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.exe' -o -name 'latest*.yml' -o -name '*.blockmap' \) -exec cp {} assets/ \;
           ls -lh assets/
           # 本任务无 checkout（无 git 上下文），gh 需显式 --repo
           gh release create "$TAG" --repo "$REPO" assets/* --title "gitid $TAG" --generate-notes \
