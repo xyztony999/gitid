@@ -270,25 +270,39 @@ function expandUserPath(input) {
   return String(input).replace(/^~(?=[/\\]|$)/, os.homedir());
 }
 
+// git includeIf.gitdir 对照的是 .git 的真实路径（解析联接/符号链接）。
+// CI 的 Windows Temp 经常是 junction，只 path.resolve 会对不上。
+function realExistingPath(p) {
+  const abs = path.resolve(expandUserPath(p));
+  try {
+    if (fs.existsSync(abs)) return fs.realpathSync.native(abs);
+  } catch {}
+  return abs;
+}
+
+function toPosixDir(p) {
+  let s = String(p).replace(/\\/g, '/');
+  if (!s.endsWith('/')) s += '/';
+  return s;
+}
+
 function normalizeGitdir(dir) {
   const raw = dir === undefined || dir === null || dir === true ? '' : String(dir).trim();
   if (!raw) throw new GitidError('bind 需要 --dir');
-  let resolved = path.resolve(expandUserPath(raw)).replace(/\\/g, '/');
-  if (!resolved.endsWith('/')) resolved += '/';
-  return resolved;
+  return toPosixDir(realExistingPath(raw));
 }
 
 function sameFsPath(a, b) {
   if (!a || !b) return false;
-  const na = path.resolve(expandUserPath(a)).replace(/\\/g, '/');
-  const nb = path.resolve(expandUserPath(b)).replace(/\\/g, '/');
+  const na = toPosixDir(realExistingPath(a)).replace(/\/$/, '');
+  const nb = toPosixDir(realExistingPath(b)).replace(/\/$/, '');
   return process.platform === 'win32' ? na.toLowerCase() === nb.toLowerCase() : na === nb;
 }
 
 function findGitdirOwners(store, normalized) {
   const owners = [];
   for (const [id, it] of Object.entries((store && store.identities) || {})) {
-    if (identityGitdirs(it).some((d) => d === normalized)) owners.push(id);
+    if (identityGitdirs(it).some((d) => d === normalized || sameFsPath(d, normalized))) owners.push(id);
   }
   return owners;
 }
@@ -359,6 +373,29 @@ function removeIdentitySnippet(id) {
   }
 }
 
+function includeIfGitdirPatterns(dir) {
+  const seen = new Set();
+  const patterns = [];
+  const push = (p) => {
+    const posix = toPosixDir(p);
+    const keys = [posix];
+    if (/^[A-Za-z]:\//.test(posix)) keys.push(posix.charAt(0).toLowerCase() + posix.slice(1));
+    for (const key of keys) {
+      const fold = process.platform === 'win32' ? key.toLowerCase() : key;
+      if (seen.has(fold)) continue;
+      seen.add(fold);
+      patterns.push(key);
+    }
+  };
+  push(dir);
+  push(path.resolve(expandUserPath(dir)));
+  try {
+    const abs = path.resolve(expandUserPath(dir));
+    if (fs.existsSync(abs)) push(fs.realpathSync.native(abs));
+  } catch {}
+  return patterns;
+}
+
 function rebuildIncludes(store) {
   const bindings = [];
   for (const [id, it] of Object.entries((store && store.identities) || {})) {
@@ -368,9 +405,12 @@ function rebuildIncludes(store) {
   const cond = process.platform === 'win32' ? 'gitdir/i' : 'gitdir';
   const lines = [];
   for (const b of bindings) {
-    lines.push(`[includeIf "${cond}:${b.dir}"]`);
-    lines.push(`\tpath = ${snippetFilePath(b.id).replace(/\\/g, '/')}`);
-    lines.push('');
+    const snippet = snippetFilePath(b.id).replace(/\\/g, '/');
+    for (const pattern of includeIfGitdirPatterns(b.dir)) {
+      lines.push(`[includeIf "${cond}:${pattern}"]`);
+      lines.push(`\tpath = ${snippet}`);
+      lines.push('');
+    }
   }
   atomicWriteManaged(includesFilePath(), lines.join('\n'));
 }
@@ -407,7 +447,9 @@ function bindGitdir(store, id, dir) {
   if (conflict) throw new GitidError(`目录已绑定到 ${conflict}，请先 unbind`);
 
   const before = identityGitdirs(it);
-  const gitdirs = before.includes(normalized) ? [...before] : [...before, normalized];
+  const gitdirs = before.some((d) => d === normalized || sameFsPath(d, normalized))
+    ? [...before]
+    : [...before, normalized];
   const nextIt = { ...it, gitdirs };
   const preview = { ...store, identities: { ...store.identities, [id]: nextIt } };
   try {
@@ -450,8 +492,8 @@ function unbindGitdir(store, { id, dir } = {}) {
   const before = identityGitdirs(it);
   let next;
   if (normalized) {
-    if (!before.includes(normalized)) throw new GitidError('未找到该目录绑定');
-    next = before.filter((d) => d !== normalized);
+    if (!before.some((d) => d === normalized || sameFsPath(d, normalized))) throw new GitidError('未找到该目录绑定');
+    next = before.filter((d) => d !== normalized && !sameFsPath(d, normalized));
   } else {
     next = [];
   }
@@ -502,9 +544,14 @@ function resolveOriginFile(originFile, cwd) {
 
 function classifyConfigSource(originFile, { cwd } = {}) {
   if (!originFile) return 'none';
-  const origin = resolveOriginFile(originFile, cwd);
+  const origin = resolveOriginFile(String(originFile).replace(/\r/g, ''), cwd);
   const root = repoRoot(cwd);
-  if (root && sameFsPath(origin, path.join(root, '.git', 'config'))) return 'local';
+  if (root) {
+    const candidates = [path.join(root, '.git', 'config')];
+    const absGitDir = git(['rev-parse', '--absolute-git-dir'], { allowFail: true, cwd: root });
+    if (absGitDir.ok && absGitDir.out) candidates.push(path.join(absGitDir.out.replace(/[\r\n]/g, ''), 'config'));
+    if (candidates.some((p) => sameFsPath(origin, p))) return 'local';
+  }
   if (sameFsPath(origin, globalGitconfigPath())) return 'global';
   return 'includeIf';
 }
@@ -512,14 +559,16 @@ function classifyConfigSource(originFile, { cwd } = {}) {
 function cfgGetOrigin(key, { cwd } = {}) {
   const r = git(['config', '--show-origin', '--get', key], { allowFail: true, cwd });
   if (!r.ok || !r.out) return { value: undefined, originFile: undefined, source: 'none' };
-  const tab = r.out.indexOf('\t');
+  const line = r.out.replace(/\r/g, '');
+  const tab = line.indexOf('\t');
   let rawOrigin = '';
-  let value = r.out;
+  let value = line;
   if (tab >= 0) {
-    rawOrigin = r.out.slice(0, tab);
-    value = r.out.slice(tab + 1);
+    rawOrigin = line.slice(0, tab);
+    value = line.slice(tab + 1);
   }
-  const originFile = rawOrigin.startsWith('file:') ? rawOrigin.slice(5) : rawOrigin;
+  let originFile = rawOrigin.startsWith('file:') ? rawOrigin.slice(5) : rawOrigin;
+  if (originFile.startsWith('//') && /^[A-Za-z]:/.test(originFile.slice(2))) originFile = originFile.slice(2);
   const resolved = originFile ? resolveOriginFile(originFile, cwd) : undefined;
   return { value, originFile: resolved, source: classifyConfigSource(resolved, { cwd }) };
 }
@@ -881,7 +930,10 @@ function scanRepos(store, root, depth = 6) {
     });
     const nameOrigin = cfgGetOrigin('user.name', { cwd: repo });
     const emailOrigin = cfgGetOrigin('user.email', { cwd: repo });
-    const source = nameOrigin.source !== 'none' ? nameOrigin.source : emailOrigin.source;
+    let source = nameOrigin.source !== 'none' ? nameOrigin.source : emailOrigin.source;
+    if (hasLocal && source !== 'local' && local.name === effective.name && local.email === effective.email) {
+      source = 'local';
+    }
     const originFile = nameOrigin.originFile;
     const row = { path: repo, rel: path.relative(base, repo) || '.', local, effective, hasLocal, identityId, status, remotes, source, originFile };
     if (emailOrigin.originFile && (!originFile || !sameFsPath(emailOrigin.originFile, originFile))) {
