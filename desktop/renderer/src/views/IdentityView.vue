@@ -63,6 +63,24 @@
           <span v-if="signingLabel(record)"><code>{{ signingLabel(record) }}</code></span>
           <span v-else class="dim">{{ t('common.dash') }}</span>
         </template>
+        <template v-else-if="column.key === 'gitdirs'">
+          <a-space v-if="record.gitdirs && record.gitdirs.length" :size="4" wrap>
+            <a-popconfirm
+              v-for="dir in record.gitdirs"
+              :key="dir"
+              :title="t('identity.unbindConfirm', { dir })"
+              :ok-text="t('common.ok')"
+              :cancel-text="t('common.cancel')"
+              @confirm="unbindDir(record, dir)"
+            >
+              <a-tag class="gitdir-tag">
+                {{ dir }}
+                <CloseOutlined class="gitdir-close" />
+              </a-tag>
+            </a-popconfirm>
+          </a-space>
+          <span v-else class="dim">{{ t('identity.gitdirsNone') }}</span>
+        </template>
         <template v-else-if="column.key === 'actions'">
           <a-space :size="4">
             <a-popconfirm
@@ -146,7 +164,7 @@
 <script setup>
 import { computed, reactive, ref } from 'vue';
 import { message } from 'ant-design-vue';
-import { PlusOutlined } from '@ant-design/icons-vue';
+import { CloseOutlined, PlusOutlined } from '@ant-design/icons-vue';
 import { api } from '../api.js';
 import { t } from '../i18n.js';
 
@@ -159,7 +177,8 @@ const columns = computed(() => [
   { title: t('identity.colEmail'), key: 'email', ellipsis: true },
   { title: t('identity.colInsteadOf'), key: 'insteadOf', width: 90 },
   { title: t('identity.colAccounts'), key: 'accounts', width: 90 },
-  { title: t('identity.colSigning'), key: 'signingkey', width: 180 },
+  { title: t('identity.colSigning'), key: 'signingkey', width: 160 },
+  { title: t('identity.colGitdirs'), key: 'gitdirs', width: 220 },
   { title: t('identity.colActions'), key: 'actions', width: 200, align: 'right' },
 ]);
 
@@ -285,6 +304,16 @@ async function removeIdentity(record) {
   }
 }
 
+async function unbindDir(record, dir) {
+  try {
+    await api.unbindIdentity({ id: record.id, dir });
+    message.success(t('identity.unbound', { dir }));
+    emit('changed');
+  } catch (e) {
+    message.error(e.message);
+  }
+}
+
 async function openImport() {
   try {
     const r = await api.importGlobal();
@@ -301,4 +330,6 @@ async function openImport() {
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .dim { color: #94a3b8; font-weight: normal; }
 .identity-form { margin-top: 8px; }
+.gitdir-tag { max-width: 200px; cursor: pointer; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; }
+.gitdir-close { margin-left: 4px; font-size: 10px; opacity: 0.65; }
 </style>

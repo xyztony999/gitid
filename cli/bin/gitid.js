@@ -29,7 +29,7 @@ const VERSION = require('../package.json').version;
 const PROGRAM = 'gitid';
 const FLAG_WITH_VALUE = new Set([
   'name', 'email', 'signingkey', 'set', 'config', 'depth', 'as', 'insteadOf', 'remote', 'account',
-  'format', 'repos', 'repos-from', 'output', 'expect', 'scan',
+  'format', 'repos', 'repos-from', 'output', 'expect', 'scan', 'dir',
 ]);
 
 // ---------- 输出与颜色 ----------
@@ -161,10 +161,12 @@ async function cmdAdd({ positional, flags }) {
   if (flags.format) gpgFormat = String(flags.format);
   else if (exists && exists.gpgFormat) gpgFormat = exists.gpgFormat;
 
-  const store2 = core.upsertIdentity(store, id, { name, email, signingkey, gpgsign, gpgFormat, insteadOf, accounts, extra }).store;
+  const upserted = core.upsertIdentity(store, id, { name, email, signingkey, gpgsign, gpgFormat, insteadOf, accounts, extra });
+  const store2 = upserted.store;
   saveStore(store2, flags.config && flags.config !== true ? flags.config : undefined);
   const saved = store2.identities[id];
   info(`${exists ? '已更新' : '已新增'}身份 ${bold(id)} —— ${name} <${email}>${signingkey ? cyan(` [签名 ${signingkey}]`) : ''}${saved && saved.gpgFormat ? cyan(` [格式 ${saved.gpgFormat}]`) : ''}${insteadOf.length ? cyan(` [URL重写 ×${insteadOf.length}]`) : ''}${accounts.length ? cyan(` [凭据账号 ×${accounts.length}]`) : ''}`);
+  if (upserted.refreshed) info(dim(`refresh snippet ${id}`));
   info(dim(`应用：gitid use ${id}（全局） 或 gitid use ${id} --local（仅当前仓库）`));
 }
 
@@ -181,10 +183,11 @@ async function cmdList() {
   const root = repoRoot();
   const l = root ? readApplied('local', store, { cwd: root }) : null;
 
-  const rows = [['', 'ID', '姓名', '邮箱', '签名键']];
+  const rows = [['', 'ID', '姓名', '邮箱', '签名键', '绑定目录']];
   for (const [id, it] of Object.entries(store.identities)) {
     const marks = [g.identityId === id ? yellow('★') : ' ', l && l.identityId === id ? cyan('◆') : ' '].join('');
-    rows.push([marks, id, it.name, it.email, it.signingkey || dim('—')]);
+    const dirs = core.identityGitdirs(it).join('; ');
+    rows.push([marks, id, it.name, it.email, it.signingkey || dim('—'), dirs]);
   }
   printTable(rows, { indent: '' });
   const legend = [`  ${yellow('★')} = 当前全局生效`];
@@ -198,6 +201,18 @@ function printChanges(changes) {
     info(green(`  ${dim(ch.key)}: ${ch.from === undefined ? dim('（未设置）') : ch.from} → ${ch.to === undefined ? dim('（已清除）') : ch.to}${mark}`));
   }
   if (!changes.length) info(dim('（配置无变化）'));
+}
+
+function printManagedChanges(changes) {
+  for (const ch of changes || []) {
+    const verb = ch.action || 'set';
+    if (ch.key === 'gitdirs') {
+      const fmt = (v) => (Array.isArray(v) ? (v.join('; ') || '（无）') : (v ?? '（无）'));
+      info(green(`  ${verb} gitdirs: ${fmt(ch.from)} → ${fmt(ch.to)}`));
+      continue;
+    }
+    info(green(`  ${verb} ${ch.key}${ch.id ? ` ${ch.id}` : ''}`));
+  }
 }
 
 async function cmdUse({ positional, flags }) {
@@ -249,8 +264,9 @@ async function cmdUse({ positional, flags }) {
   const where = scope === 'local' ? `${bold('当前仓库')}（${repoRoot()}）` : bold('全局');
   info(`已将身份 ${bold(id)} —— ${it.name} <${it.email}> 应用于${where}`);
   printChanges(changes);
-
   if (scope === 'global') {
+    const refreshed = core.refreshIdentitySnippet(store, id);
+    if (refreshed) info(dim(`refresh snippet ${id}`));
     const root = repoRoot();
     if (root) {
       const l = readApplied('local', store, { cwd: root });
@@ -265,26 +281,57 @@ async function cmdLocal(args) {
   return cmdUse({ positional: args.positional, flags: { ...args.flags, local: true } });
 }
 
+function sourceTag(source) {
+  if (source === 'local') return '本地覆盖';
+  if (source === 'includeIf') return '目录绑定';
+  if (source === 'global') return '继承全局';
+  return '未设置';
+}
+
+function sourceArrow(origin) {
+  if (!origin || origin.source === 'none') return dim('未设置');
+  if (origin.source === 'local') return '← 本地';
+  if (origin.source === 'global') return '← 全局';
+  const file = origin.originFile ? ` ${origin.originFile}` : '';
+  return `← includeIf${file}`;
+}
+
 async function cmdCurrent() {
   const store = loadStore();
   const root = repoRoot();
+  const cwd = root || undefined;
   const l = root ? readApplied('local', store, { cwd: root }) : null;
   const g = readApplied('global', store);
+  const nameOrigin = core.cfgGetOrigin('user.name', { cwd });
+  const emailOrigin = core.cfgGetOrigin('user.email', { cwd });
+  const keyOrigin = {
+    name: nameOrigin,
+    email: emailOrigin,
+    signingkey: core.cfgGetOrigin('user.signingkey', { cwd }),
+    gpgFormat: core.cfgGetOrigin('gpg.format', { cwd }),
+  };
   const eff = {
-    name: core.cfgGetEffective('user.name'),
-    email: core.cfgGetEffective('user.email'),
-    signingkey: core.cfgGetEffective('user.signingkey'),
-    gpgFormat: core.cfgGetEffective('gpg.format'),
+    name: nameOrigin.value,
+    email: emailOrigin.value,
+    signingkey: keyOrigin.signingkey.value,
+    gpgFormat: keyOrigin.gpgFormat.value,
   };
   const effId = core.matchIdentity(store, eff.name, eff.email);
   const hasLocal = l && (l.name !== undefined || l.email !== undefined);
+  const overallSource = nameOrigin.source !== 'none' ? nameOrigin.source : emailOrigin.source;
 
   if (root) info(`${dim('仓库')}   ${root}${repoBranch() ? dim(`（${repoBranch()}）`) : ''}`);
   else info(`${dim('目录')}   ${process.cwd()}${dim('（非 git 仓库，仅展示全局身份）')}`);
 
   if (effId) {
-    const tag = hasLocal ? yellow('本地覆盖') : '继承全局';
-    info(`${dim('生效')}   ${bold(effId)} —— ${eff.name} <${eff.email}> ${dim(`[${tag}]`)}`);
+    let tag;
+    if (nameOrigin.source !== emailOrigin.source && nameOrigin.source !== 'none' && emailOrigin.source !== 'none') {
+      tag = `name=${sourceTag(nameOrigin.source)} email=${sourceTag(emailOrigin.source)}`;
+    } else {
+      tag = sourceTag(overallSource);
+    }
+    if (overallSource === 'includeIf' && nameOrigin.originFile) tag += ` ${nameOrigin.originFile}`;
+    info(`${dim('生效')}   ${bold(effId)} —— ${eff.name} <${eff.email}> ${dim(`[${overallSource === 'local' ? yellow(tag) : tag}]`)}`);
   } else if (eff.name !== undefined || eff.email !== undefined) {
     info(`${dim('生效')}   ${eff.name || '?'} <${eff.email || '?'}> ${yellow('[未匹配到已存身份，可能为手动配置]')}`);
     info(dim('        可运行 gitid import 将其保存为身份档案'));
@@ -293,20 +340,15 @@ async function cmdCurrent() {
     info(dim('        先 gitid add <id> --name ... --email ...，再 gitid use <id>'));
   }
 
-  const src = (key) => {
-    if (hasLocal && l[key] !== undefined) return '← 本地';
-    if (g[key] !== undefined) return '← 全局';
-    return dim('未设置');
-  };
   const rows = [
-    [dim('  user.name'), eff.name ?? dim('—'), src('name')],
-    [dim('  user.email'), eff.email ?? dim('—'), src('email')],
+    [dim('  user.name'), eff.name ?? dim('—'), sourceArrow(keyOrigin.name)],
+    [dim('  user.email'), eff.email ?? dim('—'), sourceArrow(keyOrigin.email)],
   ];
-  if (eff.signingkey !== undefined || (hasLocal && l.signingkey !== undefined)) {
-    rows.push([dim('  user.signingkey'), eff.signingkey ?? dim('—'), src('signingkey')]);
+  if (eff.signingkey !== undefined || (hasLocal && l.signingkey !== undefined) || keyOrigin.signingkey.source === 'includeIf') {
+    rows.push([dim('  user.signingkey'), eff.signingkey ?? dim('—'), sourceArrow(keyOrigin.signingkey)]);
   }
-  if (eff.gpgFormat !== undefined || (hasLocal && l.gpgFormat !== undefined)) {
-    rows.push([dim('  gpg.format'), eff.gpgFormat ?? dim('—'), src('gpgFormat')]);
+  if (eff.gpgFormat !== undefined || (hasLocal && l.gpgFormat !== undefined) || keyOrigin.gpgFormat.source === 'includeIf') {
+    rows.push([dim('  gpg.format'), eff.gpgFormat ?? dim('—'), sourceArrow(keyOrigin.gpgFormat)]);
   }
   for (const r of rows) info(pad(r[0], 18) + pad(r[1], 34) + dim(r[2]));
 
@@ -347,14 +389,37 @@ async function cmdRemove({ positional }) {
   const [id] = positional;
   if (!id) die('用法：gitid remove <id>');
   const store = loadStore();
-  getIdentity(store, id);
-  delete store.identities[id];
+  const result = core.removeIdentity(store, id);
   saveStore(store);
+  printManagedChanges(result.changes.filter((ch) => ch.action !== 'removed'));
   info(`已删除身份档案 ${bold(id)}${dim('（已写入 git 配置的值不受影响）')}`);
+  if (result.changes.some((ch) => ch.action === 'removed')) info(dim(`removed ${id}`));
   const g = readApplied('global', store);
   if (g.name !== undefined && g.email && core.matchIdentity(store, g.name, g.email) === null) {
     info(yellow(`全局 git 配置仍指向 ${g.name} <${g.email}>，如需更换请 gitid use <其他身份>`));
   }
+}
+
+function cmdBind({ positional, flags }) {
+  const [id] = positional;
+  if (!id) die('用法：gitid bind <id> --dir <路径>');
+  if (!flags.dir || flags.dir === true) die('bind 需要 --dir');
+  const store = loadStore();
+  const result = core.bindGitdir(store, id, String(flags.dir));
+  saveStore(store);
+  info(`已绑定身份 ${bold(id)} → ${result.dir}`);
+  printManagedChanges(result.changes);
+}
+
+function cmdUnbind({ positional, flags }) {
+  const [id] = positional;
+  const dir = flags.dir && flags.dir !== true ? String(flags.dir) : undefined;
+  if (!id && !dir) die('用法：gitid unbind <id> [--dir <路径>] 或 gitid unbind --dir <路径>');
+  const store = loadStore();
+  const result = core.unbindGitdir(store, { id, dir });
+  saveStore(store);
+  info(`已解除目录绑定（${result.id}）`);
+  printManagedChanges(result.changes);
 }
 
 async function cmdImport({ flags }) {
@@ -460,12 +525,13 @@ async function cmdScan({ positional, flags }) {
         }).join(' ')
       : dim('—');
     const eff = r.status === 'missing' ? red('缺失') : `${r.effective.name ?? '?'} <${r.effective.email ?? '?'}>`;
-    table.push([statusMark[r.status], label, remotes, eff, r.rel]);
+    const mark = `${statusMark[r.status]}${r.source === 'includeIf' ? ` ${cyan('▣')}` : ''}`;
+    table.push([mark, label, remotes, eff, r.rel]);
   }
   printTable(table, { indent: '' });
   info('');
-  info(dim(`共 ${summary.total} 个仓库：${summary.withLocal} 个本地覆盖 · ${summary.missing} 个配置缺失${summary.unknown ? ` · ${summary.unknown} 个未匹配已存身份` : ''}${summary.mirrored ? ` · ${summary.mirrored} 个镜像推送` : ''}`));
-  info(dim('状态：✓ 正常  ✗ 缺 user.name/user.email  ⚠ 生效值未匹配任何身份档案  ◆ 本地覆盖  ⊕ 镜像推送'));
+  info(dim(`共 ${summary.total} 个仓库：${summary.withLocal} 个本地覆盖${summary.withIncludeIf ? ` · ${summary.withIncludeIf} 个目录绑定` : ''} · ${summary.missing} 个配置缺失${summary.unknown ? ` · ${summary.unknown} 个未匹配已存身份` : ''}${summary.mirrored ? ` · ${summary.mirrored} 个镜像推送` : ''}`));
+  info(dim('状态：✓ 正常  ✗ 缺 user.name/user.email  ⚠ 生效值未匹配任何身份档案  ◆ 本地覆盖  ⊕ 镜像推送  ▣ 目录绑定'));
 }
 
 // ---------- 远程镜像管理（当前仓库；凭据归 GCM/SSH，gitid 只写非密钥配置） ----------
@@ -660,20 +726,26 @@ function cmdHelp() {
   info(`      ${dim('--format 声明 gpg.format；省略则档案不带该字段，应用时 unset')}`);
   info(`      ${dim('--insteadOf 原始地址=替换地址 可重复：随身份切换 URL 重写（镜像加速/多账号协议），凭据归 GCM/SSH')}`);
   info(`      ${dim('--account host=用户名 可重复：凭据账号选择器（GCM 按 username 取凭据，token 不入档案）')}`);
-  info(`  ${PROGRAM} list                ${dim('列出所有身份（★=当前全局 ◆=当前仓库本地覆盖）')}`);
+  info(`  ${PROGRAM} list                ${dim('列出所有身份（★=当前全局 ◆=当前仓库本地覆盖；含绑定目录）')}`);
   info(`  ${PROGRAM} use <id> [--local] [--repos <路径>…] [--repos-from <文件|->] [--include-unknown]`);
   info(`      ${dim('应用身份：默认写入全局，--local 仅当前仓库；--repos / --repos-from 强制逐仓本地写入')}`);
+  info(`      ${dim('全局 use 若该身份已有目录绑定，只刷新其 snippet，不增删绑定')}`);
   info(`      ${dim('--repos-from 读 scan --json，默认只取 missing；--include-unknown 另含 unknown')}`);
   info(`  ${PROGRAM} local <id>          ${dim('等价于 use <id> --local（亦可带 --repos / --repos-from）')}`);
-  info(`  ${PROGRAM} current             ${dim('查看当前目录生效身份与来源（本地覆盖 → 全局回退）')}`);
+  info(`  ${PROGRAM} current             ${dim('查看当前目录生效身份与来源（本地覆盖 → 目录绑定 → 全局回退）')}`);
+  info(`  ${PROGRAM} bind <id> --dir <路径>`);
+  info(`      ${dim('把身份绑定到目录树：立即写 snippet + includeIf（目录不存在也可绑定）')}`);
+  info(`  ${PROGRAM} unbind <id> [--dir <路径>]`);
+  info(`      ${dim('解除目录绑定并回收片段；亦可 unbind --dir <路径> 按路径反查')}`);
   info(`  ${PROGRAM} unset [--local|--global]`);
   info(`      ${dim('清除身份键（默认 --local，仅当前仓库；含 gpg.format）')}`);
-  info(`  ${PROGRAM} remove <id>         ${dim('删除身份档案（不影响已写入的 git 配置）')}`);
+  info(`  ${PROGRAM} remove <id>         ${dim('删除身份档案（不改已应用的 global/local 键；回收该身份托管 include 片段）')}`);
   info(`  ${PROGRAM} import [--as <id>] [--scan [目录]] [--depth N] [--dry-run]`);
   info(`      ${dim('无 --scan：将现有全局 git 身份导入为档案')}`);
   info(`      ${dim('--scan：只收编 status=unknown 的手配；同名邮已在库则跳过；--dry-run 只打印')}`);
   info(`  ${PROGRAM} scan [目录] [--depth N] [--save] [--json] [--format json|markdown|csv] [--output <文件>]`);
   info(`      ${dim('扫描目录下所有 git 仓库，审计身份配置与远程镜像状态（默认深度 6，不深入仓库内部）')}`);
+  info(`      ${dim('来源 local / includeIf / global；▣ 表示生效来自目录绑定')}`);
   info(`      ${dim('--save 把目录与深度存为默认；--json / --format 导出，--output 写入文件')}`);
   info(`  ${PROGRAM} audit [仓库] [--expect <id>] [--json]`);
   info(`      ${dim('只读聚合作者 name/email；--expect 把邮箱不等于该身份的作者标为污染；mailmap 只建议不写文件')}`);
@@ -693,6 +765,7 @@ function cmdHelp() {
   info(`  -v, --version     ${dim('显示版本')}`);
   info('');
   info(dim('身份档案仅保存在本机；git 配置以 git 自身为准，gitid 不做后台钩子。'));
+  info(dim('目录绑定经 includeIf.gitdir 生效：规则不进 ~/.gitconfig 正文，只写托管片段。'));
   info(dim('安装后 gitid 与 git id 均可调用（bin 同时注册 git-id）。'));
   info(dim('图形界面：desktop/（Electron + Vue3），与 CLI 共用同一份身份档案。'));
 }
@@ -742,6 +815,8 @@ const COMMANDS = {
   rm: cmdRemove,
   import: cmdImport,
   scan: cmdScan,
+  bind: cmdBind,
+  unbind: cmdUnbind,
   audit: cmdAudit,
   doctor: cmdDoctor,
   completion: cmdCompletion,

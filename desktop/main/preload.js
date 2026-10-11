@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('gitid', {
   getStore: () => ipcRenderer.invoke('store:get'),
   saveIdentity: (id, fields) => ipcRenderer.invoke('identity:save', id, fields),
   removeIdentity: (id) => ipcRenderer.invoke('identity:remove', id),
+  bindIdentity: (payload) => ipcRenderer.invoke('identity:bind', payload),
+  unbindIdentity: (payload) => ipcRenderer.invoke('identity:unbind', payload),
   applyGlobal: (id) => ipcRenderer.invoke('identity:applyGlobal', id),
   applyLocal: (repo, id) => ipcRenderer.invoke('identity:applyLocal', repo, id),
   unsetLocal: (repo) => ipcRenderer.invoke('identity:unsetLocal', repo),

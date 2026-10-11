@@ -187,6 +187,15 @@ function watchForChanges() {
   };
   watchFileSafe(core.configPath());
   watchFileSafe(path.join(os.homedir(), '.gitconfig'));
+  // 托管 include 片段（CLI bind/unbind 后刷新 UI）；不监听工作树、不自动切身份
+  watchFileSafe(core.includesFilePath());
+  const snippetsDir = path.join(core.gitidDir(), 'snippets');
+  watchFileSafe(snippetsDir);
+  try {
+    if (fs.existsSync(snippetsDir) && fs.statSync(snippetsDir).isDirectory()) {
+      fs.watch(snippetsDir, { persistent: true }, () => broadcast());
+    }
+  } catch { /* 平台不支持目录 watch 时仍靠 watchFile */ }
   if (process.platform !== 'win32') {
     const xdgGit = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
     watchFileSafe(path.join(xdgGit, 'git', 'config'));
@@ -221,7 +230,9 @@ handle('store:get', () => buildStorePayload());
 
 handle('identity:save', (e, id, fields) => {
   const store = core.loadStore();
-  const { store: s2, exists } = core.upsertIdentity(store, id, fields);
+  const safe = { ...(fields || {}) };
+  delete safe.gitdirs; // 禁止表单手填；已有绑定由 upsert 保留并刷新 snippet
+  const { store: s2, exists } = core.upsertIdentity(store, id, safe);
   core.saveStore(s2);
   broadcast();
   return { exists };
@@ -229,8 +240,7 @@ handle('identity:save', (e, id, fields) => {
 
 handle('identity:remove', (e, id) => {
   const store = core.loadStore();
-  core.getIdentity(store, id);
-  delete store.identities[id];
+  core.removeIdentity(store, id);
   core.saveStore(store);
   broadcast();
 });
@@ -239,11 +249,37 @@ handle('identity:applyGlobal', (e, id) => {
   const store = core.loadStore();
   const it = core.getIdentity(store, id);
   const changes = core.applyIdentity(it, 'global', { store });
+  core.refreshIdentitySnippet(store, id);
   broadcast();
   if (!IS_TEST) {
     new Notification({ title: 'gitid 全局身份已切换', body: `${id} — ${it.name} <${it.email}>` }).show();
   }
   return { changes };
+});
+
+handle('identity:bind', (e, payload = {}) => {
+  const id = payload && payload.id;
+  const dir = payload && payload.dir;
+  if (!id) throw new GitidError('请选择身份档案');
+  if (dir === undefined || dir === null || dir === '') throw new GitidError('请指定目录树');
+  const store = core.loadStore();
+  const result = core.bindGitdir(store, id, dir);
+  core.saveStore(store);
+  broadcast();
+  return { gitdirs: result.gitdirs, changes: result.changes };
+});
+
+handle('identity:unbind', (e, payload = {}) => {
+  const id = payload && payload.id ? payload.id : undefined;
+  const dir = payload && payload.dir !== undefined && payload.dir !== null && payload.dir !== ''
+    ? payload.dir
+    : undefined;
+  if (!id && dir === undefined) throw new GitidError('请指定身份或目录');
+  const store = core.loadStore();
+  const result = core.unbindGitdir(store, { id, dir });
+  core.saveStore(store);
+  broadcast();
+  return { gitdirs: result.gitdirs, changes: result.changes };
 });
 
 handle('identity:applyLocal', (e, repoPath, id) => {
@@ -449,7 +485,8 @@ handle('app:quitAndInstall', () => {
 function ipcApplyGlobal(_event, id) {
   try {
     const store = core.loadStore();
-    core.applyIdentity(core.getIdentity(store, id), 'global');
+    core.applyIdentity(core.getIdentity(store, id), 'global', { store });
+    core.refreshIdentitySnippet(store, id);
     broadcast();
   } catch (e) {
     console.error('托盘切换失败：', e.message);

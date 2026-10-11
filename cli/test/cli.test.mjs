@@ -572,7 +572,7 @@ test('scan --json / --format csv', () => {
   const csv = sb.run(['scan', path.join(sb.home, 'repos'), '--format', 'csv']);
   assert.equal(csv.code, 0, csv.err);
   const header = csv.out.split(/\r?\n/)[0];
-  assert.equal(header, 'status,identityId,hasLocal,name,email,remotes,path');
+  assert.equal(header, 'status,identityId,hasLocal,name,email,remotes,path,source,originFile');
   assert.match(csv.out, /demo/);
 
   const bad = sb.run(['scan', path.join(sb.home, 'repos'), '--format', 'xml']);
@@ -653,6 +653,9 @@ test('completion bash 且未知 shell 退出 1', () => {
   assert.match(r.out, /--repos-from/);
   assert.match(r.out, /--include-unknown/);
   assert.match(r.out, /--format/);
+  assert.match(r.out, /\bbind\b/);
+  assert.match(r.out, /\bunbind\b/);
+  assert.match(r.out, /--dir/);
 
   const zsh = sb.run(['completion', 'zsh']);
   assert.equal(zsh.code, 0, zsh.err);
@@ -661,4 +664,168 @@ test('completion bash 且未知 shell 退出 1', () => {
   const bad = sb.run(['completion', 'cmd']);
   assert.equal(bad.code, 1);
   assert.match(bad.err, /未知 shell/);
+});
+
+test('bind 后该目录下仓库 current 命中身份且来源为 includeIf', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  sb.run(['add', 'personal', '--name', 'tony', '--email', 'tony@me.dev']);
+  sb.run(['use', 'personal']);
+
+  const workRoot = path.join(sb.home, 'work');
+  fs.mkdirSync(workRoot, { recursive: true });
+  const bind = sb.run(['bind', 'work', '--dir', workRoot]);
+  assert.equal(bind.code, 0, bind.err);
+  assert.match(bind.out, /set gitdirs/);
+  assert.match(bind.out, /write snippet/);
+  assert.match(bind.out, /write includes/);
+  assert.match(bind.out, /ensure hook|keep hook/);
+
+  const gitidDir = path.dirname(sb.env.GITID_CONFIG);
+  const snippet = path.join(gitidDir, 'snippets', 'work.gitconfig');
+  const includes = path.join(gitidDir, 'includes.gitconfig');
+  assert.ok(fs.existsSync(snippet));
+  assert.ok(fs.existsSync(includes));
+  const globalCfg = fs.readFileSync(path.join(sb.home, '.gitconfig'), 'utf8');
+  assert.doesNotMatch(globalCfg, /includeIf/);
+  assert.match(globalCfg, /includes\.gitconfig/);
+  assert.equal(sb.git(['config', '--global', '--get', 'user.email']).out, 'tony@me.dev');
+
+  const repo = path.join(workRoot, 'corp-app');
+  fs.mkdirSync(repo, { recursive: true });
+  sb.git(['init', '-q'], repo);
+
+  const email = sb.git(['config', '--get', 'user.email'], repo);
+  assert.equal(email.out, 'zhangsan@corp.com', email.err);
+  const origin = sb.git(['config', '--show-origin', '--get', 'user.email'], repo);
+  assert.match(origin.out, /snippets/);
+
+  const cur = sb.run(['current'], repo);
+  assert.equal(cur.code, 0, cur.err);
+  assert.match(cur.out, /work/);
+  assert.match(cur.out, /includeIf|目录绑定/);
+
+  const scan = sb.run(['scan', workRoot, '--json']);
+  assert.equal(scan.code, 0, scan.err);
+  const data = JSON.parse(scan.out);
+  assert.equal(data.rows[0].source, 'includeIf');
+  assert.ok(data.summary.withIncludeIf >= 1);
+  const human = sb.run(['scan', workRoot]);
+  assert.match(human.out, /▣/);
+
+  const list = sb.run(['list']);
+  assert.match(list.out, /绑定目录|work/);
+});
+
+test('仓库 local 覆盖仍优先于 includeIf', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  sb.run(['add', 'personal', '--name', 'tony', '--email', 'tony@me.dev']);
+  sb.run(['use', 'personal']);
+
+  const workRoot = path.join(sb.home, 'work');
+  fs.mkdirSync(workRoot, { recursive: true });
+  assert.equal(sb.run(['bind', 'work', '--dir', workRoot]).code, 0);
+
+  const repo = path.join(workRoot, 'mixed');
+  fs.mkdirSync(repo, { recursive: true });
+  sb.git(['init', '-q'], repo);
+  const local = sb.run(['use', 'personal', '--local'], repo);
+  assert.equal(local.code, 0, local.err);
+
+  assert.equal(sb.git(['config', '--local', '--get', 'user.email'], repo).out, 'tony@me.dev');
+  const cur = sb.run(['current'], repo);
+  assert.equal(cur.code, 0, cur.err);
+  assert.match(cur.out, /personal/);
+  assert.match(cur.out, /本地覆盖/);
+  assert.match(cur.out, /← 本地/);
+  assert.doesNotMatch(cur.out, /目录绑定/);
+
+  const scan = JSON.parse(sb.run(['scan', workRoot, '--json']).out);
+  assert.equal(scan.rows[0].source, 'local');
+});
+
+test('同路径二次 bind 不同身份退出 1', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  sb.run(['add', 'personal', '--name', 'tony', '--email', 'tony@me.dev']);
+
+  const workRoot = path.join(sb.home, 'work');
+  fs.mkdirSync(workRoot, { recursive: true });
+  assert.equal(sb.run(['bind', 'work', '--dir', workRoot]).code, 0);
+
+  const again = sb.run(['bind', 'personal', '--dir', workRoot]);
+  assert.equal(again.code, 1);
+  assert.match(again.err, /已绑定到 work/);
+
+  const child = path.join(workRoot, 'oss');
+  const overlap = sb.run(['bind', 'personal', '--dir', child]);
+  assert.equal(overlap.code, 0, overlap.err);
+
+  const missingDir = sb.run(['bind', 'work']);
+  assert.equal(missingDir.code, 1);
+  assert.match(missingDir.err, /bind 需要 --dir/);
+
+  const ghost = sb.run(['bind', 'ghost', '--dir', workRoot]);
+  assert.equal(ghost.code, 1);
+  assert.match(ghost.err, /身份「ghost」不存在/);
+});
+
+test('unbind / remove 身份回收片段不清 global', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhangsan@corp.com']);
+  sb.run(['use', 'work']);
+  const workRoot = path.join(sb.home, 'work');
+  fs.mkdirSync(workRoot, { recursive: true });
+  assert.equal(sb.run(['bind', 'work', '--dir', workRoot]).code, 0);
+
+  const gitidDir = path.dirname(sb.env.GITID_CONFIG);
+  const snippet = path.join(gitidDir, 'snippets', 'work.gitconfig');
+  assert.ok(fs.existsSync(snippet));
+  assert.equal(sb.git(['config', '--global', '--get', 'user.email']).out, 'zhangsan@corp.com');
+
+  const un = sb.run(['unbind', 'work']);
+  assert.equal(un.code, 0, un.err);
+  assert.match(un.out, /unset gitdirs/);
+  assert.match(un.out, /remove snippet/);
+  assert.ok(!fs.existsSync(snippet));
+  assert.equal(sb.git(['config', '--global', '--get', 'user.email']).out, 'zhangsan@corp.com');
+
+  const missing = sb.run(['unbind', '--dir', path.join(sb.home, 'nope-bind')]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.err, /未找到该目录绑定/);
+
+  assert.equal(sb.run(['bind', 'work', '--dir', workRoot]).code, 0);
+  assert.ok(fs.existsSync(snippet));
+  const rm = sb.run(['remove', 'work']);
+  assert.equal(rm.code, 0, rm.err);
+  assert.match(rm.out, /remove snippet|已删除身份档案/);
+  assert.ok(!fs.existsSync(snippet));
+  assert.equal(sb.git(['config', '--global', '--get', 'user.email']).out, 'zhangsan@corp.com');
+});
+
+test('改档案后已有 snippet 被刷新', () => {
+  const sb = makeSandbox();
+  sb.run(['add', 'work', '--name', '张三', '--email', 'zhang@old.com']);
+  const workRoot = path.join(sb.home, 'work');
+  fs.mkdirSync(workRoot, { recursive: true });
+  assert.equal(sb.run(['bind', 'work', '--dir', '~/work']).code, 0);
+
+  const snippet = path.join(path.dirname(sb.env.GITID_CONFIG), 'snippets', 'work.gitconfig');
+  assert.match(fs.readFileSync(snippet, 'utf8'), /zhang@old\.com/);
+
+  const upd = sb.run(['add', 'work', '--name', '张三', '--email', 'zhang@new.com']);
+  assert.equal(upd.code, 0, upd.err);
+  assert.match(upd.out, /refresh snippet work/);
+  assert.match(fs.readFileSync(snippet, 'utf8'), /zhang@new\.com/);
+  assert.doesNotMatch(fs.readFileSync(snippet, 'utf8'), /zhang@old\.com/);
+
+  const used = sb.run(['use', 'work']);
+  assert.equal(used.code, 0, used.err);
+  assert.match(used.out, /refresh snippet work/);
+  assert.match(fs.readFileSync(snippet, 'utf8'), /zhang@new\.com/);
+
+  const store = JSON.parse(fs.readFileSync(sb.env.GITID_CONFIG, 'utf8'));
+  assert.ok(Array.isArray(store.identities.work.gitdirs));
+  assert.ok(store.identities.work.gitdirs.length >= 1);
 });

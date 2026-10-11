@@ -272,3 +272,98 @@ test('GITID_DRIVE 集成验证：仓库单独设置身份 / 改回继承全局�
   assert.equal(git(['config', '--local', '--get', 'user.email']).status, 1);
   assert.equal(git(['config', '--get', 'user.email']).stdout.trim(), 'zhang@corp.com');
 });
+
+test('IPC 三端对齐：identity:bind / identity:unbind', () => {
+  const main = fs.readFileSync(path.resolve(here, '../main/index.js'), 'utf8');
+  const preload = fs.readFileSync(path.resolve(here, '../main/preload.js'), 'utf8');
+  const api = fs.readFileSync(path.resolve(here, '../renderer/src/api.js'), 'utf8');
+  assert.match(main, /handle\('identity:bind'/);
+  assert.match(main, /handle\('identity:unbind'/);
+  assert.match(main, /core\.bindGitdir/);
+  assert.match(main, /core\.unbindGitdir/);
+  assert.match(main, /core\.removeIdentity/);
+  assert.match(main, /core\.refreshIdentitySnippet/);
+  assert.match(main, /includesFilePath/);
+  assert.match(main, /snippets/);
+  assert.match(preload, /identity:bind/);
+  assert.match(preload, /identity:unbind/);
+  assert.match(api, /bindIdentity/);
+  assert.match(api, /unbindIdentity/);
+  assert.match(main, /delete safe\.gitdirs/);
+});
+
+test('core：bind/unbind + scan source=includeIf + remove 回收片段（沙箱）', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gitid-desktop-includeif-'));
+  const workRoot = path.join(home, 'work');
+  const repo = path.join(workRoot, 'corp-app');
+  fs.mkdirSync(repo, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    GITID_CONFIG: path.join(home, '.config', 'gitid', 'config.json'),
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const script = `
+    const { spawnSync } = require('node:child_process');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const core = require(${JSON.stringify(path.resolve(here, '../main/core.js'))});
+    const store = core.loadStore();
+    core.upsertIdentity(store, 'work', { name: '张三', email: 'z@corp.com' });
+    core.upsertIdentity(store, 'personal', { name: '李四', email: 'li@me.dev' });
+    core.saveStore(store);
+    core.applyIdentity(core.getIdentity(core.loadStore(), 'personal'), 'global', { store: core.loadStore() });
+    const s1 = core.loadStore();
+    const bound = core.bindGitdir(s1, 'work', ${JSON.stringify(workRoot)});
+    core.saveStore(s1);
+    spawnSync('git', ['init', '-q'], { cwd: ${JSON.stringify(repo)}, env: process.env });
+    const scanned = core.scanRepos(core.loadStore(), ${JSON.stringify(workRoot)}, 3);
+    const exported = core.formatScanReport(scanned, 'csv');
+    const snippet = core.snippetFilePath('work');
+    const snippetBefore = fs.existsSync(snippet);
+    const s2 = core.loadStore();
+    let conflict = '';
+    try { core.bindGitdir(s2, 'personal', ${JSON.stringify(workRoot)}); } catch (e) { conflict = e.message; }
+    const s3 = core.loadStore();
+    const fields = { name: '张三', email: 'z@new.com', gitdirs: ['/should/not/write/'] };
+    core.upsertIdentity(s3, 'work', fields);
+    core.saveStore(s3);
+    const afterSave = core.loadStore().identities.work;
+    core.refreshIdentitySnippet(core.loadStore(), 'work');
+    const snippetText = fs.readFileSync(snippet, 'utf8');
+    const s4 = core.loadStore();
+    core.removeIdentity(s4, 'work');
+    core.saveStore(s4);
+    const snippetAfter = fs.existsSync(snippet);
+    const globalEmail = core.cfgGet('global', 'user.email');
+    console.log(JSON.stringify({
+      gitdirs: bound.gitdirs,
+      source: scanned.rows[0] && scanned.rows[0].source,
+      withIncludeIf: scanned.summary.withIncludeIf,
+      exportedHasSource: exported.includes('source'),
+      snippetBefore, snippetAfter, conflict,
+      savedGitdirs: afterSave.gitdirs,
+      rejectedHandPath: (afterSave.gitdirs || []).includes('/should/not/write/'),
+      snippetHasNew: snippetText.includes('z@new.com'),
+      globalEmail,
+      workGone: !core.loadStore().identities.work,
+    }));
+  `;
+  const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr || r.stdout);
+  const out = JSON.parse(r.stdout.trim());
+  assert.ok(Array.isArray(out.gitdirs) && out.gitdirs.length >= 1);
+  assert.equal(out.source, 'includeIf');
+  assert.ok(out.withIncludeIf >= 1);
+  assert.equal(out.exportedHasSource, true);
+  assert.equal(out.snippetBefore, true);
+  assert.equal(out.snippetAfter, false);
+  assert.match(out.conflict, /已绑定到 work/);
+  assert.equal(out.rejectedHandPath, false);
+  assert.ok(Array.isArray(out.savedGitdirs) && out.savedGitdirs.length >= 1);
+  assert.equal(out.snippetHasNew, true);
+  assert.equal(out.globalEmail, 'li@me.dev');
+  assert.equal(out.workGone, true);
+});

@@ -28,21 +28,33 @@
       <span v-if="summaryText" class="dim">{{ summaryText }}</span>
     </div>
 
-    <div v-if="rows.length" class="toolbar actions-bar">
+    <div v-if="rows.length || canBindDir" class="toolbar actions-bar">
       <a-space>
-        <a-button v-if="unknownCount" @click="confirmImport">{{ t('repo.importUnknown') }}</a-button>
-        <a-button :disabled="!selectedKeys.length" @click="openBatch">{{ t('repo.batch') }}</a-button>
-        <a-button @click="selectMissing">{{ t('repo.selectMissing') }}</a-button>
-        <a-dropdown>
-          <a-button>{{ t('repo.export') }}</a-button>
-          <template #overlay>
-            <a-menu @click="onExport">
-              <a-menu-item key="json">JSON</a-menu-item>
-              <a-menu-item key="markdown">Markdown</a-menu-item>
-              <a-menu-item key="csv">CSV</a-menu-item>
-            </a-menu>
-          </template>
-        </a-dropdown>
+        <a-button :disabled="!canBindDir" @click="openBind">{{ t('repo.bindDir') }}</a-button>
+        <a-popconfirm
+          v-if="scanRootBound"
+          :title="t('repo.unbindConfirm')"
+          :ok-text="t('common.ok')"
+          :cancel-text="t('common.cancel')"
+          @confirm="doUnbind"
+        >
+          <a-button>{{ t('repo.unbindDir') }}</a-button>
+        </a-popconfirm>
+        <template v-if="rows.length">
+          <a-button v-if="unknownCount" @click="confirmImport">{{ t('repo.importUnknown') }}</a-button>
+          <a-button :disabled="!selectedKeys.length" @click="openBatch">{{ t('repo.batch') }}</a-button>
+          <a-button @click="selectMissing">{{ t('repo.selectMissing') }}</a-button>
+          <a-dropdown>
+            <a-button>{{ t('repo.export') }}</a-button>
+            <template #overlay>
+              <a-menu @click="onExport">
+                <a-menu-item key="json">JSON</a-menu-item>
+                <a-menu-item key="markdown">Markdown</a-menu-item>
+                <a-menu-item key="csv">CSV</a-menu-item>
+              </a-menu>
+            </template>
+          </a-dropdown>
+        </template>
       </a-space>
     </div>
 
@@ -66,7 +78,12 @@
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'status'">
-          <a-tag :color="statusMeta[record.status].color">{{ t(`repo.status.${record.status}`) }}</a-tag>
+          <a-tooltip :title="originTooltip(record)">
+            <span class="status-cell">
+              <a-tag :color="statusMeta[record.status].color">{{ t(`repo.status.${record.status}`) }}</a-tag>
+              <a-tag v-if="record.source === 'includeIf'" color="cyan">{{ t('repo.source.includeIf') }}</a-tag>
+            </span>
+          </a-tooltip>
         </template>
         <template v-else-if="column.key === 'repo'">
           <a-tooltip :title="record.path">
@@ -91,6 +108,7 @@
           </a-space>
         </template>
         <template v-else-if="column.key === 'identity'">
+          <a-tooltip :title="originTooltip(record)">
           <a-select
             :value="selectValue(record)"
             :placeholder="t('repo.manualLocal')"
@@ -105,6 +123,7 @@
               {{ opt.id }} — {{ opt.name }} &lt;{{ opt.email }}&gt;
             </a-select-option>
           </a-select>
+          </a-tooltip>
         </template>
         <template v-else-if="column.key === 'effective'">
           <span v-if="record.status === 'missing'" class="mono">{{ t('repo.missingKeys') }}</span>
@@ -153,6 +172,29 @@
           <a-button danger size="small" @click="disableMirror">{{ t('repo.clearMirror') }}</a-button>
         </a-form-item>
         <div class="dim mirror-note">{{ t('repo.mirrorNote') }}</div>
+      </a-form>
+    </a-modal>
+
+    <a-modal
+      v-model:open="bind.open"
+      :title="t('repo.bindTitle')"
+      :ok-text="t('repo.bindDir')"
+      :cancel-text="t('common.cancel')"
+      :confirm-loading="bind.loading"
+      @ok="doBind"
+    >
+      <a-form layout="vertical">
+        <a-form-item :label="t('repo.bindIdentity')" required>
+          <a-select v-model:value="bind.id" :placeholder="t('repo.bindIdentityPh')" style="width: 100%">
+            <a-select-option v-for="opt in identityOptions" :key="opt.id" :value="opt.id">
+              {{ opt.id }} — {{ opt.name }} &lt;{{ opt.email }}&gt;
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item :label="t('repo.bindDirLabel')">
+          <code class="mono">{{ bindRoot }}</code>
+        </a-form-item>
+        <div class="dim bind-hint">{{ t('repo.bindHint') }}</div>
       </a-form>
     </a-modal>
 
@@ -257,7 +299,7 @@ watch(() => props.store, (s) => {
 }, { immediate: true });
 
 const columns = computed(() => [
-  { title: t('repo.colStatus'), key: 'status', width: 96 },
+  { title: t('repo.colStatus'), key: 'status', width: 148 },
   { title: t('repo.colRepo'), key: 'repo', ellipsis: true },
   { title: t('repo.colRemotes'), key: 'remotes', width: 190 },
   { title: t('repo.colIdentity'), key: 'identity', width: 260 },
@@ -300,9 +342,109 @@ const summaryText = computed(() => {
   if (!summary.value) return '';
   const s = summary.value;
   return t('repo.summary', { total: s.total, withLocal: s.withLocal, missing: s.missing })
+    + (s.withIncludeIf ? t('repo.summaryIncludeIf', { n: s.withIncludeIf }) : '')
     + (s.unknown ? t('repo.summaryUnknown', { n: s.unknown }) : '')
     + (s.mirrored ? t('repo.summaryMirror', { n: s.mirrored }) : '');
 });
+
+function expandScanRoot(dir) {
+  let s = String(dir || '').trim().replace(/\\/g, '/');
+  if (!s) return '';
+  if (s === '~' || s.startsWith('~/')) {
+    const cfg = String(props.store.configPath || '').replace(/\\/g, '/');
+    let home = '';
+    const xdg = cfg.toLowerCase().indexOf('/.config/gitid/');
+    if (xdg >= 0) home = cfg.slice(0, xdg);
+    else {
+      const app = cfg.toLowerCase().indexOf('/appdata/roaming/gitid/');
+      if (app >= 0) home = cfg.slice(0, app);
+    }
+    if (home) s = s === '~' ? home : `${home}${s.slice(1)}`;
+  }
+  if (!s.endsWith('/')) s += '/';
+  return s;
+}
+
+function sameDir(a, b) {
+  const norm = (p) => {
+    let s = String(p || '').replace(/\\/g, '/').toLowerCase();
+    if (s && !s.endsWith('/')) s += '/';
+    return s;
+  };
+  return norm(a) === norm(b);
+}
+
+function scanRootCandidates() {
+  const out = [];
+  const expanded = expandScanRoot(bindRoot.value);
+  if (expanded) out.push(expanded);
+  if (rows.value.length) {
+    const first = rows.value[0];
+    const p = String(first.path || '').replace(/\\/g, '/');
+    const rel = String(first.rel || '').replace(/\\/g, '/');
+    if (p) {
+      let base = p;
+      if (rel && rel !== '.') {
+        if (p.endsWith(`/${rel}`)) base = p.slice(0, -rel.length);
+      }
+      if (!base.endsWith('/')) base += '/';
+      out.push(base);
+    }
+  }
+  return out;
+}
+
+const bindRoot = computed(() => (root.value || '').trim() || defaultRoot());
+const canBindDir = computed(() => !!bindRoot.value);
+const scanRootBound = computed(() => {
+  const candidates = scanRootCandidates();
+  if (!candidates.length) return false;
+  return (props.store.identities || []).some((it) =>
+    (it.gitdirs || []).some((d) => candidates.some((c) => sameDir(d, c))),
+  );
+});
+
+function originTooltip(record) {
+  if (!record || !record.originFile) return undefined;
+  return t('repo.originFile', { file: record.originFile });
+}
+
+const bind = reactive({ open: false, id: undefined, loading: false });
+
+function openBind() {
+  if (!bindRoot.value) { message.warning(t('repo.bindNeedRoot')); return; }
+  bind.id = (identityOptions.value[0] && identityOptions.value[0].id) || undefined;
+  bind.open = true;
+}
+
+async function doBind() {
+  if (!bind.id) { message.warning(t('repo.bindNeedId')); return; }
+  if (!bindRoot.value) { message.warning(t('repo.bindNeedRoot')); return; }
+  bind.loading = true;
+  try {
+    const r = await api.bindIdentity({ id: bind.id, dir: bindRoot.value });
+    const dir = (r && r.gitdirs && r.gitdirs[r.gitdirs.length - 1]) || bindRoot.value;
+    message.success(t('repo.bindDone', { dir, id: bind.id }));
+    bind.open = false;
+    emit('changed');
+    await scan();
+  } catch (e) {
+    message.error(e.message);
+  } finally {
+    bind.loading = false;
+  }
+}
+
+async function doUnbind() {
+  try {
+    await api.unbindIdentity({ dir: bindRoot.value });
+    message.success(t('repo.unbindDone'));
+    emit('changed');
+    await scan();
+  } catch (e) {
+    message.error(e.message);
+  }
+}
 
 const rowSelection = computed(() => ({
   selectedRowKeys: selectedKeys.value,
@@ -560,4 +702,6 @@ onMounted(() => {
 .mirror-note { font-size: 12px; margin-top: -8px; }
 .batch-list { max-height: 200px; overflow: auto; padding-left: 20px; }
 .copy-btn { margin-top: 8px; }
+.status-cell { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.bind-hint { font-size: 12px; margin-top: -4px; }
 </style>

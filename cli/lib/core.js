@@ -121,8 +121,13 @@ function upsertIdentity(store, id, fields) {
     else delete it.accounts; // 空数组 = 清除该身份的全部凭据选择器
   }
   if (fields.extra && Object.keys(fields.extra).length) it.extra = fields.extra;
+  const prev = store.identities[id];
+  if (prev && Array.isArray(prev.gitdirs) && prev.gitdirs.length) {
+    it.gitdirs = [...prev.gitdirs];
+  }
   store.identities[id] = it;
-  return { store, exists };
+  const refreshed = identityGitdirs(it).length ? refreshIdentitySnippet(store, id) : null;
+  return { store, exists, refreshed };
 }
 
 function getIdentity(store, id) {
@@ -238,6 +243,285 @@ function extraConfigKeys(it) {
   for (const p of (it && it.insteadOf) || []) keys.add(insteadOfConfigKey(p));
   for (const a of (it && it.accounts) || []) keys.add(accountConfigKey(a));
   return keys;
+}
+
+// ---------- includeIf 目录绑定（托管片段；~/.gitconfig 正文只留一条 include 钩子） ----------
+
+const CONFIG_SOURCES = new Set(['local', 'includeIf', 'global', 'none']);
+
+function gitidDir(p = configPath()) {
+  return path.dirname(p);
+}
+
+function includesFilePath(p = configPath()) {
+  return path.join(gitidDir(p), 'includes.gitconfig');
+}
+
+function snippetFilePath(id, p = configPath()) {
+  return path.join(gitidDir(p), 'snippets', `${id}.gitconfig`);
+}
+
+function identityGitdirs(it) {
+  if (!it || !Array.isArray(it.gitdirs)) return [];
+  return it.gitdirs.filter((d) => typeof d === 'string' && d);
+}
+
+function expandUserPath(input) {
+  return String(input).replace(/^~(?=[/\\]|$)/, os.homedir());
+}
+
+function normalizeGitdir(dir) {
+  const raw = dir === undefined || dir === null || dir === true ? '' : String(dir).trim();
+  if (!raw) throw new GitidError('bind 需要 --dir');
+  let resolved = path.resolve(expandUserPath(raw)).replace(/\\/g, '/');
+  if (!resolved.endsWith('/')) resolved += '/';
+  return resolved;
+}
+
+function sameFsPath(a, b) {
+  if (!a || !b) return false;
+  const na = path.resolve(expandUserPath(a)).replace(/\\/g, '/');
+  const nb = path.resolve(expandUserPath(b)).replace(/\\/g, '/');
+  return process.platform === 'win32' ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+}
+
+function findGitdirOwners(store, normalized) {
+  const owners = [];
+  for (const [id, it] of Object.entries((store && store.identities) || {})) {
+    if (identityGitdirs(it).some((d) => d === normalized)) owners.push(id);
+  }
+  return owners;
+}
+
+function atomicWriteManaged(file, content) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const text = content == null ? '' : String(content);
+  const tmp = `${file}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, text, { mode: 0o600 });
+    try {
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EAGAIN'].includes(e.code)) {
+        try { fs.unlinkSync(tmp); } catch {}
+        throw e;
+      }
+      fs.writeFileSync(file, text, { mode: 0o600 });
+      try { fs.unlinkSync(tmp); } catch {}
+    }
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    if (e instanceof GitidError) throw e;
+    throw new GitidError(`无法写入 include 片段：${e.message}`, 2);
+  }
+}
+
+function writeIdentitySnippet(id, it) {
+  const file = snippetFilePath(id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, '', { mode: 0o600 });
+    const set = (key, value) => {
+      git(['config', '--file', tmp, key, String(value)]);
+    };
+    set('user.name', it.name);
+    set('user.email', it.email);
+    if (it.signingkey) set('user.signingkey', it.signingkey);
+    if (it.gpgsign === true) set('commit.gpgsign', 'true');
+    if (it.gpgFormat) set('gpg.format', it.gpgFormat);
+    for (const [k, v] of Object.entries(it.extra || {})) set(k, v);
+    for (const p of it.insteadOf || []) set(insteadOfConfigKey(p), p.original);
+    for (const a of it.accounts || []) set(accountConfigKey(a), a.username);
+    try {
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EAGAIN'].includes(e.code)) {
+        try { fs.unlinkSync(tmp); } catch {}
+        throw e;
+      }
+      fs.copyFileSync(tmp, file);
+      try { fs.unlinkSync(tmp); } catch {}
+    }
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    if (e instanceof GitidError) throw new GitidError(`无法写入 include 片段：${e.message}`, 2);
+    throw new GitidError(`无法写入 include 片段：${e.message}`, 2);
+  }
+}
+
+function removeIdentitySnippet(id) {
+  const file = snippetFilePath(id);
+  try {
+    fs.unlinkSync(file);
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw new GitidError(`无法写入 include 片段：${e.message}`, 2);
+  }
+}
+
+function rebuildIncludes(store) {
+  const bindings = [];
+  for (const [id, it] of Object.entries((store && store.identities) || {})) {
+    for (const dir of identityGitdirs(it)) bindings.push({ id, dir });
+  }
+  bindings.sort((a, b) => a.dir.length - b.dir.length || a.dir.localeCompare(b.dir) || a.id.localeCompare(b.id));
+  const cond = process.platform === 'win32' ? 'gitdir/i' : 'gitdir';
+  const lines = [];
+  for (const b of bindings) {
+    lines.push(`[includeIf "${cond}:${b.dir}"]`);
+    lines.push(`\tpath = ${snippetFilePath(b.id).replace(/\\/g, '/')}`);
+    lines.push('');
+  }
+  atomicWriteManaged(includesFilePath(), lines.join('\n'));
+}
+
+function ensureIncludeHook() {
+  const target = includesFilePath().replace(/\\/g, '/');
+  const r = git(['config', '--global', '--get-all', 'include.path'], { allowFail: true });
+  const paths = r.ok ? r.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [];
+  if (paths.some((p) => sameFsPath(p, target))) return 'keep';
+  try {
+    git(['config', '--global', '--add', 'include.path', target]);
+  } catch (e) {
+    throw new GitidError(`无法写入 include 片段：${e.message}`, 2);
+  }
+  return 'ensure';
+}
+
+function refreshIdentitySnippet(store, id) {
+  const it = getIdentity(store, id);
+  if (!identityGitdirs(it).length) return null;
+  try {
+    writeIdentitySnippet(id, it);
+  } catch (e) {
+    if (e instanceof GitidError) throw e;
+    throw new GitidError(`无法写入 include 片段：${e.message}`, 2);
+  }
+  return { action: 'refresh', key: 'snippet', id };
+}
+
+function bindGitdir(store, id, dir) {
+  const it = getIdentity(store, id);
+  const normalized = normalizeGitdir(dir);
+  const conflict = findGitdirOwners(store, normalized).find((oid) => oid !== id);
+  if (conflict) throw new GitidError(`目录已绑定到 ${conflict}，请先 unbind`);
+
+  const before = identityGitdirs(it);
+  const gitdirs = before.includes(normalized) ? [...before] : [...before, normalized];
+  const nextIt = { ...it, gitdirs };
+  const preview = { ...store, identities: { ...store.identities, [id]: nextIt } };
+  try {
+    writeIdentitySnippet(id, nextIt);
+    rebuildIncludes(preview);
+    const hook = ensureIncludeHook();
+    store.identities[id] = nextIt;
+    return {
+      id,
+      dir: normalized,
+      gitdirs,
+      changes: [
+        { action: 'set', key: 'gitdirs', from: before, to: gitdirs },
+        { action: 'write', key: 'snippet' },
+        { action: 'write', key: 'includes' },
+        { action: hook, key: 'hook' },
+      ],
+    };
+  } catch (e) {
+    if (e instanceof GitidError) throw e;
+    throw new GitidError(`无法写入 include 片段：${e.message}`, 2);
+  }
+}
+
+function unbindGitdir(store, { id, dir } = {}) {
+  if (!id && (dir === undefined || dir === null || dir === true || dir === '')) {
+    throw new GitidError('unbind 需要身份 id 或 --dir');
+  }
+  const normalized = dir !== undefined && dir !== null && dir !== true && dir !== ''
+    ? normalizeGitdir(dir)
+    : null;
+  let targetId = id;
+  if (!targetId) {
+    const owners = findGitdirOwners(store, normalized);
+    if (!owners.length) throw new GitidError('未找到该目录绑定');
+    if (owners.length > 1) throw new GitidError(`目录绑定到多个身份：${owners.join('、')}，请指定 id`);
+    targetId = owners[0];
+  }
+  const it = getIdentity(store, targetId);
+  const before = identityGitdirs(it);
+  let next;
+  if (normalized) {
+    if (!before.includes(normalized)) throw new GitidError('未找到该目录绑定');
+    next = before.filter((d) => d !== normalized);
+  } else {
+    next = [];
+  }
+  const nextIt = { ...it };
+  if (next.length) nextIt.gitdirs = next;
+  else delete nextIt.gitdirs;
+  const preview = { ...store, identities: { ...store.identities, [targetId]: nextIt } };
+  try {
+    rebuildIncludes(preview);
+    const removedSnippet = !next.length;
+    if (removedSnippet) removeIdentitySnippet(targetId);
+    store.identities[targetId] = nextIt;
+    const changes = [
+      { action: 'unset', key: 'gitdirs', from: before, to: next },
+      { action: 'rewrite', key: 'includes' },
+    ];
+    if (removedSnippet) changes.push({ action: 'remove', key: 'snippet' });
+    return { id: targetId, dir: normalized, gitdirs: next, changes };
+  } catch (e) {
+    if (e instanceof GitidError) throw e;
+    throw new GitidError(`无法写入 include 片段：${e.message}`, 2);
+  }
+}
+
+function removeIdentity(store, id) {
+  const it = getIdentity(store, id);
+  const changes = [];
+  if (identityGitdirs(it).length) {
+    const recycled = unbindGitdir(store, { id });
+    changes.push(...recycled.changes);
+  }
+  delete store.identities[id];
+  changes.push({ action: 'removed', key: id });
+  return { id, changes };
+}
+
+function globalGitconfigPath() {
+  if (process.env.GIT_CONFIG_GLOBAL) return path.resolve(process.env.GIT_CONFIG_GLOBAL);
+  return path.join(os.homedir(), '.gitconfig');
+}
+
+function resolveOriginFile(originFile, cwd) {
+  if (!originFile) return '';
+  const expanded = expandUserPath(originFile);
+  if (path.isAbsolute(expanded)) return path.resolve(expanded);
+  return path.resolve(cwd || process.cwd(), expanded);
+}
+
+function classifyConfigSource(originFile, { cwd } = {}) {
+  if (!originFile) return 'none';
+  const origin = resolveOriginFile(originFile, cwd);
+  const root = repoRoot(cwd);
+  if (root && sameFsPath(origin, path.join(root, '.git', 'config'))) return 'local';
+  if (sameFsPath(origin, globalGitconfigPath())) return 'global';
+  return 'includeIf';
+}
+
+function cfgGetOrigin(key, { cwd } = {}) {
+  const r = git(['config', '--show-origin', '--get', key], { allowFail: true, cwd });
+  if (!r.ok || !r.out) return { value: undefined, originFile: undefined, source: 'none' };
+  const tab = r.out.indexOf('\t');
+  let rawOrigin = '';
+  let value = r.out;
+  if (tab >= 0) {
+    rawOrigin = r.out.slice(0, tab);
+    value = r.out.slice(tab + 1);
+  }
+  const originFile = rawOrigin.startsWith('file:') ? rawOrigin.slice(5) : rawOrigin;
+  const resolved = originFile ? resolveOriginFile(originFile, cwd) : undefined;
+  return { value, originFile: resolved, source: classifyConfigSource(resolved, { cwd }) };
 }
 
 // 全量覆盖语义：身份没有的键（signingkey/gpgsign/gpg.format/extra/insteadOf）会被 unset，
@@ -595,11 +879,20 @@ function scanRepos(store, root, depth = 6) {
       const m = (x.url || '').match(/^https?:\/\/[^/?#]+/);
       return m ? { ...x, account: cfgGetEffective(`credential.${m[0]}.username`, { cwd: repo }) } : x;
     });
-    return { path: repo, rel: path.relative(base, repo) || '.', local, effective, hasLocal, identityId, status, remotes };
+    const nameOrigin = cfgGetOrigin('user.name', { cwd: repo });
+    const emailOrigin = cfgGetOrigin('user.email', { cwd: repo });
+    const source = nameOrigin.source !== 'none' ? nameOrigin.source : emailOrigin.source;
+    const originFile = nameOrigin.originFile;
+    const row = { path: repo, rel: path.relative(base, repo) || '.', local, effective, hasLocal, identityId, status, remotes, source, originFile };
+    if (emailOrigin.originFile && (!originFile || !sameFsPath(emailOrigin.originFile, originFile))) {
+      row.originFileEmail = emailOrigin.originFile;
+    }
+    return row;
   });
   const summary = {
     total: rows.length,
     withLocal: rows.filter((r) => r.hasLocal).length,
+    withIncludeIf: rows.filter((r) => r.source === 'includeIf').length,
     missing: rows.filter((r) => r.status === 'missing').length,
     unknown: rows.filter((r) => r.status === 'unknown').length,
     mirrored: rows.filter((r) => r.remotes.some((x) => x.mirror)).length,
@@ -733,7 +1026,7 @@ function formatScanReport({ rows, summary }, format) {
   const fmt = String(format || '').toLowerCase();
   if (fmt === 'json') return JSON.stringify({ rows, summary }, null, 2) + '\n';
   if (fmt === 'csv') {
-    const header = 'status,identityId,hasLocal,name,email,remotes,path';
+    const header = 'status,identityId,hasLocal,name,email,remotes,path,source,originFile';
     const lines = (rows || []).map((r) => {
       const remotes = (r.remotes || []).map((x) => x.name + (x.mirror ? '⊕' : '')).join(' ');
       return [
@@ -744,14 +1037,16 @@ function formatScanReport({ rows, summary }, format) {
         (r.effective && r.effective.email) || '',
         remotes,
         r.path,
+        r.source || '',
+        r.originFile || '',
       ].map(csvEscape).join(',');
     });
     return [header, ...lines].join('\n') + '\n';
   }
   if (fmt === 'markdown') {
     const lines = [
-      '| status | identity | hasLocal | name | email | remotes | path |',
-      '| --- | --- | --- | --- | --- | --- | --- |',
+      '| status | identity | hasLocal | name | email | remotes | path | source | originFile |',
+      '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ];
     for (const r of rows || []) {
       const remotes = (r.remotes || []).map((x) => x.name + (x.mirror ? '⊕' : '')).join(' ') || '—';
@@ -763,12 +1058,14 @@ function formatScanReport({ rows, summary }, format) {
         (r.effective && r.effective.email) || '',
         remotes,
         r.rel || r.path,
+        r.source || '',
+        r.originFile || '',
       ].map((c) => String(c).replace(/\|/g, '\\|'));
       lines.push(`| ${cells.join(' | ')} |`);
     }
     const s = summary || {};
     lines.push('');
-    lines.push(`共 ${s.total || 0} 个仓库：${s.withLocal || 0} 个本地覆盖 · ${s.missing || 0} 个配置缺失 · ${s.unknown || 0} 个未匹配已存身份${s.mirrored ? ` · ${s.mirrored} 个镜像推送` : ''}`);
+    lines.push(`共 ${s.total || 0} 个仓库：${s.withLocal || 0} 个本地覆盖${s.withIncludeIf ? ` · ${s.withIncludeIf} 个目录绑定` : ''} · ${s.missing || 0} 个配置缺失 · ${s.unknown || 0} 个未匹配已存身份${s.mirrored ? ` · ${s.mirrored} 个镜像推送` : ''}`);
     return lines.join('\n') + '\n';
   }
   throw new GitidError('导出格式只允许 json / markdown / csv');
@@ -1002,7 +1299,7 @@ _gitid() {
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
   cmd="\${COMP_WORDS[1]}"
-  local cmds="add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version"
+  local cmds="add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version bind unbind"
   local global="--config --no-color --help --version -h -v"
   if [[ \$COMP_CWORD -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "\$cmds \$global" -- "\$cur") )
@@ -1010,11 +1307,12 @@ _gitid() {
   fi
   case "\$prev" in
     --format) COMPREPLY=( $(compgen -W "openpgp ssh x509 json markdown csv" -- "\$cur") ); return ;;
-    --repos|--repos-from|--output|--config|--scan) COMPREPLY=( $(compgen -f -- "\$cur") ); return ;;
+    --repos|--repos-from|--output|--config|--scan|--dir) COMPREPLY=( $(compgen -f -- "\$cur") ); return ;;
     completion) COMPREPLY=( $(compgen -W "bash zsh fish pwsh" -- "\$cur") ); return ;;
   esac
   case "\$cmd" in
     add) COMPREPLY=( $(compgen -W "--name --email --signingkey --gpgsign --format --set --insteadOf --account \$global" -- "\$cur") ) ;;
+    bind|unbind) COMPREPLY=( $(compgen -W "--dir \$global" -- "\$cur") ) ;;
     use|local) COMPREPLY=( $(compgen -W "--local --repos --repos-from --include-unknown \$global" -- "\$cur") ) ;;
     import) COMPREPLY=( $(compgen -W "--as --scan --depth --dry-run \$global" -- "\$cur") ) ;;
     scan) COMPREPLY=( $(compgen -W "--depth --save --json --format --output \$global" -- "\$cur") ) ;;
@@ -1050,6 +1348,8 @@ _gitid() {
     'audit:提交历史审计'
     'doctor:环境体检'
     'completion:打印补全脚本'
+    'bind:绑定目录树'
+    'unbind:解除目录绑定'
     'help:帮助'
     'version:版本'
   )
@@ -1059,6 +1359,7 @@ _gitid() {
   fi
   case \$words[2] in
     add) _arguments '--name[姓名]' '--email[邮箱]' '--signingkey[签名键]' '--gpgsign' '--format[签名格式]:fmt:(openpgp ssh x509)' '--set[自定义键]' '--insteadOf[URL重写]' '--account[凭据选择器]' ;;
+    bind|unbind) _arguments '--dir[目录]:dir:_files -/' ;;
     use|local) _arguments '--local' '--repos[仓库路径]:path:_files -/' '--repos-from[scan JSON]:file:_files' '--include-unknown' ;;
     import) _arguments '--as[id]' '--scan[扫描收编]:dir:_files -/' '--depth[深度]' '--dry-run' ;;
     scan) _arguments '--depth[深度]' '--save' '--json' '--format[导出格式]:fmt:(json markdown csv)' '--output[文件]:file:_files' ;;
@@ -1074,12 +1375,13 @@ _gitid
     return `# gitid fish 补全
 complete -c gitid -f
 complete -c git-id -f
-set -l gitid_cmds add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version
-for c in add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version
+set -l gitid_cmds add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version bind unbind
+for c in add list ls use local current cur unset remove rm import scan remote credential audit doctor completion help version bind unbind
   complete -c gitid -n "not __fish_seen_subcommand_from \$gitid_cmds" -a \$c
   complete -c git-id -n "not __fish_seen_subcommand_from \$gitid_cmds" -a \$c
 end
 complete -c gitid -n "__fish_seen_subcommand_from add" -l name -l email -l signingkey -l gpgsign -l format -l set -l insteadOf -l account
+complete -c gitid -n "__fish_seen_subcommand_from bind unbind" -l dir
 complete -c gitid -n "__fish_seen_subcommand_from use local" -l local -l repos -l repos-from -l include-unknown
 complete -c gitid -n "__fish_seen_subcommand_from import" -l as -l scan -l depth -l dry-run
 complete -c gitid -n "__fish_seen_subcommand_from scan" -l depth -l save -l json -l format -l output
@@ -1093,12 +1395,13 @@ complete -c gitid -l config -l no-color -s h -l help -s v -l version
   return `# gitid PowerShell 补全
 Register-ArgumentCompleter -Native -CommandName gitid, git-id -ScriptBlock {
   param(\$wordToComplete, \$commandAst, \$cursorPosition)
-  \$cmds = @('add','list','ls','use','local','current','cur','unset','remove','rm','import','scan','remote','credential','audit','doctor','completion','help','version')
+  \$cmds = @('add','list','ls','use','local','current','cur','unset','remove','rm','import','scan','remote','credential','audit','doctor','completion','help','version','bind','unbind')
   \$tokens = \$commandAst.ToString().Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
   if (\$tokens.Count -le 1) { \$cmds | Where-Object { \$_ -like "\$wordToComplete*" } | ForEach-Object { \$_ } ; return }
   \$cmd = \$tokens[1]
   \$opts = switch (\$cmd) {
     'add' { @('--name','--email','--signingkey','--gpgsign','--format','--set','--insteadOf','--account') }
+    { \$_ -in 'bind','unbind' } { @('--dir') }
     { \$_ -in 'use','local' } { @('--local','--repos','--repos-from','--include-unknown') }
     'import' { @('--as','--scan','--depth','--dry-run') }
     'scan' { @('--depth','--save','--json','--format','--output') }
@@ -1119,11 +1422,27 @@ module.exports = {
   GPG_FORMATS,
   ID_PATTERN,
   EMAIL_PATTERN,
+  CONFIG_SOURCES,
   configPath,
   loadStore,
   saveStore,
   upsertIdentity,
   getIdentity,
+  gitidDir,
+  includesFilePath,
+  snippetFilePath,
+  identityGitdirs,
+  normalizeGitdir,
+  findGitdirOwners,
+  writeIdentitySnippet,
+  rebuildIncludes,
+  ensureIncludeHook,
+  refreshIdentitySnippet,
+  bindGitdir,
+  unbindGitdir,
+  removeIdentity,
+  cfgGetOrigin,
+  classifyConfigSource,
   getSettings,
   saveSettings,
   git,
